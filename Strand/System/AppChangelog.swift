@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "1.89"
+    static let currentVersion = "1.90"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,13 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "1.90",
+            title: "NOOP now tells you when your strap isn't saving history — and how to fix it",
+            date: "June 2026",
+            items: [
+                "Improved (Mac and Android): when a sync completes but your strap handed over only its diagnostic output and no stored history — which means its clock has lost sync and it isn't saving data to flash — NOOP now says so, with the fix (fully charge the strap to 100%, then reconnect), instead of silently reporting \"synced.\" It's the single most common reason recovery, sleep and strain stop appearing on a WHOOP 4.0, and it's now told apart from a normal caught-up sync. (#77, #91, #120)",
+            ]),
         Release(
             version: "1.89",
             title: "Live heart rate lands on today's chart even when the strap's clock is off (Android)",

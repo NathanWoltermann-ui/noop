@@ -17,6 +17,17 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.90 — NOOP now tells you when your strap isn't saving history — and how to fix it
+
+- **Improved (Mac and Android):** when a sync **completes** but your strap handed over only its
+  diagnostic output and **no stored history** — which means its clock has lost sync and it isn't saving
+  data to flash — NOOP now says so, with the fix (**fully charge the strap to 100%, then reconnect**),
+  instead of silently reporting "synced." This is the single most common reason recovery, sleep and
+  strain stop appearing on a WHOOP 4.0, and it now distinguishes that from a normal caught-up sync.
+  (#77, #91, #120)
+
+---
+
 ## 1.89 — Live heart rate lands on today's chart even when the strap's clock is off (Android)
 
 - **Fixed (Android):** if your WHOOP's internal clock was invalid (the same condition that can stop it

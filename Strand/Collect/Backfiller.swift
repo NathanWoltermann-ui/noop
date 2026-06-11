@@ -71,6 +71,10 @@ final class Backfiller {
     /// genuine write failure, in which case `finishChunk` holds the cursor/ack so the strap re-sends.
     /// nil in non-production inits (tests/preview) → archiving is skipped and acks proceed as before.
     private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)?
+    /// Per-chunk outcome hook (#77 family): (didDecodeSensorRows, wasConsoleOnly). Lets BLEManager
+    /// tally a session so a COMPLETED-but-empty offload (all console, no sensor records) can tell the
+    /// user their strap isn't banking, without false-positiving a normal caught-up sync.
+    private let onChunk: ((_ decoded: Bool, _ console: Bool) -> Void)?
 
     init(store: BackfillStoreWriting,
          deviceId: String,
@@ -78,6 +82,7 @@ final class Backfiller {
          enableRawCapture: Bool = false,
          log: ((String) -> Void)? = nil,
          rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)? = nil,
+         onChunk: ((_ decoded: Bool, _ console: Bool) -> Void)? = nil,
          extract: @escaping Extractor = { extractHistoricalStreams($0, deviceClockRef: $1, wallClockRef: $2) }) {
         self.store = store
         self.deviceId = deviceId
@@ -85,6 +90,7 @@ final class Backfiller {
         self.enableRawCapture = enableRawCapture
         self.log = log
         self.rejectedSink = rejectedSink
+        self.onChunk = onChunk
         self.extract = extract
     }
 
@@ -176,6 +182,9 @@ final class Backfiller {
             // (the "rejected frames" red herring users kept reporting — #77/#120). Drives both the
             // log wording below and the archive guard further down.
             let rejected = rejectedHistoricalRecords(frames, family: family)
+            // Tally this chunk's outcome so a completed-but-empty session is distinguishable from a
+            // caught-up one (#77 family): did it decode sensor rows, and was it console-only?
+            onChunk?(!decoded.isEmpty, decoded.isEmpty && rejected.isEmpty)
             // A chunk that produced no rows AND held no genuine rejects was pure console output — say
             // so calmly so it doesn't read as data loss (the "rejected frames" red herring, #77/#120).
             if decoded.isEmpty && rejected.isEmpty {

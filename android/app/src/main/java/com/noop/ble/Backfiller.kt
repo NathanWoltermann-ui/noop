@@ -62,6 +62,12 @@ class Backfiller(
      */
     private val onChunkCommitted: (StreamBatch) -> Unit = {},
     /**
+     * Per-console-only chunk hook (#77 family): a chunk arrived with frames but decoded no rows and
+     * held no genuine rejects — pure diagnostic/console output. Lets the client tally a completed-but-
+     * empty offload (the strap isn't banking) without false-positiving a normal caught-up sync.
+     */
+    private val onConsoleChunk: () -> Unit = {},
+    /**
      * Diagnostic sink into the strap log. Lets [finishChunk] surface a chunk that arrived with frames
      * but decoded to ZERO rows — the otherwise-invisible silent-data-loss case (frames failing CRC /
      * an unmapped layout are dropped, the chunk looks empty, the trim acks past them). Without this a
@@ -185,6 +191,9 @@ class Backfiller(
             // where one good row hid the losses). Archive the rejects durably FIRST, and only then allow
             // the ack below. The WHOOP4 happy path (zero rejects) is unchanged.
             val rejected = rejectedHistoricalRecords(frames, family)
+            // #77 family: decoded no rows AND no genuine rejects ⇒ pure console output. Tally it so a
+            // completed-but-empty offload (strap not banking) is distinguishable from a caught-up sync.
+            if (decoded.isEmpty && rejected.isEmpty()) onConsoleChunk()
             if (rejected.isNotEmpty()) {
                 log(
                     "Backfill: WARNING ${rejected.size} record frame(s) decoded to 0 rows " +

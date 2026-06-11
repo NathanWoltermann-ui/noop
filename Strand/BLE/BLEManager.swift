@@ -268,6 +268,10 @@ public final class BLEManager: NSObject, ObservableObject {
                                 log: { [weak self] s in self?.log(s) },
                                 rejectedSink: { [weak self] frames, trim, family in
                                     self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
+                                },
+                                onChunk: { [weak self] decoded, console in
+                                    if decoded { self?.state.decodedChunksThisSession += 1 }
+                                    if console { self?.state.consoleChunksThisSession += 1 }
                                 })
         // Strand: no server uploader/sync — all data stays on-device.
     }
@@ -549,6 +553,8 @@ public final class BLEManager: NSObject, ObservableObject {
         state.syncChunksThisSession = 0
         state.rejectedFramesThisSession = 0
         state.rejectedFramesUnarchived = 0
+        state.decodedChunksThisSession = 0
+        state.consoleChunksThisSession = 0
         historicalAckLogCounter = 0
         // Payload MUST be [0x00], NOT empty: verified on-device that this strap serves type-47 only with
         // [0x00] (empty → 0 frames on a clean stable link with ~2k records pending); the Mac ground-truth
@@ -661,6 +667,13 @@ public final class BLEManager: NSObject, ObservableObject {
                 state.lastSyncError = "Synced, but \(archived + unarchived) record(s) couldn't be decoded (unrecognised strap firmware layout), and the on-device archive is full — the \(unarchived) newest weren't preserved. Please share a strap log so the layout can be mapped."
             } else if archived > 0 {
                 state.lastSyncError = "Synced, but \(archived) record(s) couldn't be decoded (unrecognised strap firmware layout). The raw bytes were saved on this Mac — please share a strap log so the layout can be mapped."
+            } else if state.decodedChunksThisSession == 0 && state.consoleChunksThisSession >= 3 {
+                // #77 family: the offload COMPLETED but the strap handed over only console/diagnostic
+                // output across many chunks — no sensor records at all — i.e. it isn't banking history
+                // to flash (its RTC has lost sync). Surface the actionable fix rather than a silent
+                // "synced". A caught-up strap (few/no console chunks) does NOT reach this branch.
+                log("Backfill: completed but the strap banked no sensor history (console-only across \(state.consoleChunksThisSession) chunks) — strap not saving to flash.")
+                state.lastSyncError = "Synced, but your strap had no stored history to hand over — only its diagnostic output. This usually means its clock has lost sync, so it isn't saving data to flash. Fully charge it to 100%, then reconnect, and it should start banking again."
             } else {
                 state.lastSyncError = nil
             }
@@ -1066,6 +1079,8 @@ extension BLEManager: CBCentralManagerDelegate {
         // otherwise a stale non-zero count survives until the next beginBackfill. (#77/#91)
         state.rejectedFramesThisSession = 0
         state.rejectedFramesUnarchived = 0
+        state.decodedChunksThisSession = 0
+        state.consoleChunksThisSession = 0
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
