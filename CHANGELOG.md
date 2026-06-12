@@ -17,6 +17,13 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.6.6 — iPhone Workouts table fits the screen
+
+- **Fixed (iPhone):** the **Workouts → All Sessions** table ran off the side of the screen, clipping
+  the Sport, distance and source columns. It now scrolls sideways so every column is reachable, with a
+  hint that you **press and hold** a workout to re-label, edit or delete it. (macOS is wide enough to
+  show the full table, so it's unchanged.) Thanks @sebastianwoo. (#183)
+
 ## 2.6.5 — Broadcast your heart rate to Garmin, Zwift and gym kit
 
 - **New (iPhone & Android, experimental):** **Broadcast heart rate** — your WHOOP 5.0/MG can now

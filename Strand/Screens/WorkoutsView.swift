@@ -353,18 +353,40 @@ struct WorkoutsView: View {
                           overline: "Log",
                           trailing: "\(rows.count) total")
             NoopCard(padding: 0) {
-                LazyVStack(spacing: 0) {
-                    sessionHeaderRow
-                    Divider().overlay(StrandPalette.hairline)
-                    ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
-                        sessionRow(row)
-                            .background(idx % 2 == 1
-                                        ? StrandPalette.surfaceInset.opacity(0.4)
-                                        : Color.clear)
-                        if idx != rows.count - 1 {
-                            Divider().overlay(StrandPalette.hairline.opacity(0.5))
-                        }
-                    }
+                // The fixed-width columns total ≈612pt — wider than an iPhone — so on iOS the table
+                // scrolls horizontally instead of clipping the SPORT / DIST / SOURCE columns (#183).
+                // macOS windows are wide enough to show it all, so they keep the full-width layout.
+                #if os(iOS)
+                ScrollView(.horizontal, showsIndicators: true) {
+                    sessionsTable(rows: rows)
+                }
+                #else
+                sessionsTable(rows: rows)
+                #endif
+            }
+            #if os(iOS)
+            // The per-row actions live in a long-press context menu, which isn't discoverable on
+            // iPhone without a nudge (#183).
+            Text("Press and hold a workout to re-label, edit or delete it.")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .padding(.horizontal, 4)
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private func sessionsTable(rows: [WorkoutRow]) -> some View {
+        LazyVStack(spacing: 0) {
+            sessionHeaderRow
+            Divider().overlay(StrandPalette.hairline)
+            ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                sessionRow(row)
+                    .background(idx % 2 == 1
+                                ? StrandPalette.surfaceInset.opacity(0.4)
+                                : Color.clear)
+                if idx != rows.count - 1 {
+                    Divider().overlay(StrandPalette.hairline.opacity(0.5))
                 }
             }
         }
