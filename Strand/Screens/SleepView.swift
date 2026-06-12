@@ -46,6 +46,15 @@ struct SleepView: View {
     /// `decodedNight` JSON-decodes, which must never run per body pass (1Hz HR ticks). (#160)
     @State private var navNight: Night?
 
+    /// Every sleep BLOCK, UN-deduplicated — `repo.sleeps` keeps one session per night for the
+    /// dashboard, which collapses split-sleep nights (a nap + a main sleep on the same day) into
+    /// a single block. The hero's ◀/▶ should be able to browse each individual block so it lines
+    /// up with the export. Derived locally from reads SleepView already has (`repo.sleepSessions`
+    /// = all imported sessions un-deduped, plus the computed-only nights `repo.sleeps` already
+    /// resolved) so Repository stays untouched. Oldest→newest. Falls back to `repo.sleeps` until
+    /// loaded. (#170)
+    @State private var allSessions: [CachedSleepSession] = []
+
     var body: some View {
         // Resolve the memoized model for THIS render. `dataKey` is O(1)-ish (counts + last-row
         // identity), so comparing it every render is cheap. When it matches the cached key we
@@ -91,7 +100,37 @@ struct SleepView: View {
                     navNight = nil
                 }
             }
+            // Load EVERY sleep block (un-deduplicated) so the hero's ◀/▶ can browse split-sleep
+            // naps the dashboard collapses. Re-runs whenever a sync/import bumps refreshSeq.
+            // Snaps the browse back to the newest block once the fuller list arrives. (#170)
+            .task(id: repo.refreshSeq) {
+                allSessions = await loadAllSessions()
+                nightOffset = 0
+                navNight = nil
+            }
         }
+    }
+
+    /// Build the UN-deduplicated block list locally, WITHOUT touching Repository: start from every
+    /// imported session (`repo.sleepSessions` is not collapsed per-night), then add the nights that
+    /// only the on-device computed source covers — those are exactly the `repo.sleeps` winners whose
+    /// end-day no imported session lands on. This reproduces the dashboard's imported-wins / computed-
+    /// fills merge while preserving same-day naps + split sleep. Oldest→newest by onset. (#170)
+    @MainActor
+    private func loadAllSessions() async -> [CachedSleepSession] {
+        let now = Int(Date().timeIntervalSince1970)
+        let span = 4000 * 86_400
+        let imported = await repo.sleepSessions(from: now - span, to: now + 86_400, limit: 4000)
+        let cal = Calendar.current
+        func endDay(_ s: CachedSleepSession) -> Date {
+            cal.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(s.endTs)))
+        }
+        var importedDays = Set<Date>()
+        for s in imported { importedDays.insert(endDay(s)) }
+        // `repo.sleeps` carries one winner per night (imported OR computed). Keep only its
+        // computed-only nights — the imported ones are already in `imported`, un-deduped.
+        let computedOnly = repo.sleeps.filter { !importedDays.contains(endDay($0)) }
+        return (imported + computedOnly).sorted { $0.startTs < $1.startTs }
     }
 
     // MARK: - 1. HERO — stage breakdown
@@ -447,12 +486,19 @@ struct SleepView: View {
     /// the hypnogram draws genuine segments instead of the synthetic reconstruction.
     private var latestNight: Night? { decodedNight(at: 0) }
 
-    /// The night `offset` sleep-sessions back from the most recent (0 = last night), decoded into
-    /// a `Night`. Backs the hero's ◀/▶ navigation via the `navNight` cache — JSON-decodes, so it
+    /// The browsable BLOCK list: every sleep session un-deduplicated (incl. same-day naps / split
+    /// sleep) so ◀/▶ matches the export. Falls back to `repo.sleeps` (one-per-night) until the
+    /// fuller list loads, so the hero is never empty during the first frame. (#170)
+    private var navSessions: [CachedSleepSession] {
+        allSessions.isEmpty ? repo.sleeps : allSessions
+    }
+
+    /// The block `offset` sessions back from the most recent (0 = last night/last block), decoded
+    /// into a `Night`. Backs the hero's ◀/▶ navigation via the `navNight` cache — JSON-decodes, so it
     /// only runs from `buildModel()` and the onChange handlers, never per render. The index clamp
-    /// is a belt-and-braces guard; the offset itself resets to 0 on every data change. (#160)
+    /// is a belt-and-braces guard; the offset itself resets to 0 on every data change. (#160, #170)
     private func decodedNight(at offset: Int) -> Night? {
-        let sleeps = repo.sleeps
+        let sleeps = navSessions
         guard !sleeps.isEmpty else { return nil }
         let idx = min(max(sleeps.count - 1 - offset, 0), sleeps.count - 1)
         let s = sleeps[idx]
@@ -465,10 +511,10 @@ struct SleepView: View {
         return nil
     }
 
-    /// The raw session row `offset` back from the newest, clamped to bounds. Backs the honest
-    /// no-stage-data header when a navigated session doesn't decode to usable stages. (#160)
+    /// The raw session row `offset` back from the newest block, clamped to bounds. Backs the honest
+    /// no-stage-data header when a navigated session doesn't decode to usable stages. (#160, #170)
     private func sessionRow(at offset: Int) -> CachedSleepSession? {
-        let sleeps = repo.sleeps
+        let sleeps = navSessions
         guard !sleeps.isEmpty else { return nil }
         return sleeps[min(max(sleeps.count - 1 - offset, 0), sleeps.count - 1)]
     }
@@ -478,7 +524,7 @@ struct SleepView: View {
     /// hierarchy so the hero reads like every other section. (#160)
     @ViewBuilder
     private func nightNavHeader(trailing: String) -> some View {
-        let lastIndex = max(repo.sleeps.count - 1, 0)
+        let lastIndex = max(navSessions.count - 1, 0)
         let title: LocalizedStringKey = nightOffset == 0 ? "Last night"
             : (nightOffset == 1 ? "1 night ago" : "\(nightOffset) nights ago")
         HStack(spacing: 12) {

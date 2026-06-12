@@ -109,7 +109,7 @@ struct TodayView: View {
 
     @ViewBuilder
     private var readinessSection: some View {
-        let r = ReadinessEngine.evaluate(days: repo.days, today: Repository.localDayKey(Date()))
+        let r = ReadinessEngine.evaluate(days: repo.days, today: Repository.logicalDayKey(Date()))
         if r.level != .insufficient {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 SectionHeader("Readiness", overline: "Should you push today?")
@@ -535,8 +535,11 @@ struct TodayView: View {
         workouts = await repo.workoutRows()
         appleDays = await repo.appleDailyRows()
 
-        // Today's HR trend — 5-minute bucket means from local midnight → now.
-        let startOfToday = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
+        // Today's HR trend — 5-minute bucket means from the LOGICAL day's local midnight → now. The
+        // logical day rolls at 04:00 (Repository.logicalDayStart), so in the small hours after midnight
+        // the window still starts at yesterday's midnight and the chart keeps the evening's curve rather
+        // than blanking to an empty new-calendar-day axis (#144).
+        let startOfToday = Int(Repository.logicalDayStart(Date()).timeIntervalSince1970)
         let nowTs = Int(Date().timeIntervalSince1970)
         hrPoints = await repo.hrBuckets(from: startOfToday, to: nowTs, bucketSeconds: 300)
             .map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }

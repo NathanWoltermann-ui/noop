@@ -236,6 +236,20 @@ extension WhoopStore {
                 t.add(column: "activeKcalEst", .double)
             }
         }
+
+        // v12 (#156): PPG-derived per-second HR from the WHOOP 5.0 v26 optical buffer. Stored in its OWN
+        // table (not hrSample) so the measured `hr` is never conflated with the derived estimate — reads
+        // COALESCE hrSample first, ppgHrSample only where hrSample has no row. Additive only; bpm/conf
+        // are REAL (bpm is a float estimate, conf is the 0–1 autocorrelation peak).
+        migrator.registerMigration("v12") { db in
+            try db.create(table: "ppgHrSample") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("bpm", .double).notNull()
+                t.column("conf", .double).notNull()
+                t.primaryKey(["deviceId", "ts"])
+            }
+        }
         return migrator
     }
 }

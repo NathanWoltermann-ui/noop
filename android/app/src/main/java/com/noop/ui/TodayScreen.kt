@@ -67,17 +67,25 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
     val live by viewModel.live.collectAsStateWithLifecycle()
     var footer by remember { mutableStateOf(TodayFooterState()) }
     var selectedDayOffset by remember { mutableIntStateOf(0) }
-    val selectedDay = remember(selectedDayOffset) { LocalDate.now().minusDays(selectedDayOffset.toLong()) }
+    // Anchor offset-0 to the LOGICAL day (rolls at 04:00 local), so between midnight and 4am "Today"
+    // still resolves to the prior calendar day's banked row instead of an empty new-calendar-day row
+    // that blanks the dashboard (#144). Past offsets count back from this anchor. Presentation-only.
+    val todayDate = logicalDayNow()
+    val selectedDay = remember(selectedDayOffset, todayDate) { todayDate.minusDays(selectedDayOffset.toLong()) }
     val selectedDayKey = remember(selectedDay) { selectedDay.toString() }
     val historicalMetric = remember(days, selectedDayKey) { days.lastOrNull { it.day == selectedDayKey } }
     val displayMetric = remember(today, historicalMetric, selectedDayOffset) {
         if (selectedDayOffset == 0) today ?: historicalMetric else historicalMetric
     }
+    // Keep the explicit calendar date visible alongside Today/Yesterday so the logical-day remap stays
+    // honest — between midnight and 04:00 "Today" still points at the prior calendar date, and showing
+    // that date makes it obvious which day's row is on screen (#144).
     val dayLabel = remember(selectedDayOffset, selectedDay) {
+        val date = selectedDay.format(DateTimeFormatter.ofPattern("EEE, d MMM", Locale.US))
         when (selectedDayOffset) {
-            0 -> "Today"
-            1 -> "Yesterday"
-            else -> selectedDay.format(DateTimeFormatter.ofPattern("EEE, d MMM", Locale.US))
+            0 -> "Today · $date"
+            1 -> "Yesterday · $date"
+            else -> date
         }
     }
     val synthesisTitle = remember(selectedDayOffset) {
@@ -234,7 +242,7 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         Spacer(Modifier.height(Metrics.selectorTopUp))
         SectionHeader("Key Metrics", overline = dayLabel, trailing = "14-day trend")
         MetricGrid(displayMetric, window, recoveryCalibration, unitSystem, weightKg, profileWeightKg, importedStepsForDay)
-        HeartRateTrendCard(viewModel, days, selectedDay)
+        HeartRateTrendCard(viewModel, days, selectedDay, todayDate)
         TodayWorkoutsSection(footer.recentWorkouts)
         // Strap battery only while the link is up AND a real reading exists — a stale % from a
         // dropped connection must not present as live (#159).
@@ -465,15 +473,23 @@ private fun MetricGrid(
 // so the buckets — being uniform 5-min means in time order — read as an even left-to-right day curve.
 
 @Composable
-private fun HeartRateTrendCard(viewModel: AppViewModel, days: List<DailyMetric>, selectedDay: LocalDate) {
+private fun HeartRateTrendCard(
+    viewModel: AppViewModel,
+    days: List<DailyMetric>,
+    selectedDay: LocalDate,
+    today: LocalDate,
+) {
+    // "Today" here is the LOGICAL day (rolls at 04:00 local), so in the small hours after midnight the
+    // trend keeps the evening's curve — window start at the logical day's own midnight, "since midnight"
+    // subtitle, "Today" label — rather than blanking to an empty new-calendar-day axis (#144).
     var buckets by remember { mutableStateOf<List<Double>>(emptyList()) }
     // Re-load when the day list changes (a sync/import updates it), and on first composition.
-    LaunchedEffect(days, selectedDay) {
+    LaunchedEffect(days, selectedDay, today) {
         val zone = ZoneId.systemDefault()
         val start = selectedDay.atStartOfDay(zone).toEpochSecond()
         val nextStart = selectedDay.plusDays(1).atStartOfDay(zone).toEpochSecond()
         val now = System.currentTimeMillis() / 1000
-        val end = if (selectedDay == LocalDate.now(zone)) now else (nextStart - 1)
+        val end = if (selectedDay == today) now else (nextStart - 1)
         buckets = viewModel.repo.hrBuckets("my-whoop", start, end, 300L).map { it.avgBpm }
     }
     if (buckets.size < 2) return
@@ -484,8 +500,8 @@ private fun HeartRateTrendCard(viewModel: AppViewModel, days: List<DailyMetric>,
     val avg = buckets.average().roundToInt()
 
     val selectedLabel = when (selectedDay) {
-        LocalDate.now() -> "Today"
-        LocalDate.now().minusDays(1) -> "Yesterday"
+        today -> "Today"
+        today.minusDays(1) -> "Yesterday"
         else -> selectedDay.format(DateTimeFormatter.ofPattern("d MMM", Locale.US))
     }
 
@@ -496,7 +512,7 @@ private fun HeartRateTrendCard(viewModel: AppViewModel, days: List<DailyMetric>,
             Row(verticalAlignment = Alignment.Top) {
                 Column(modifier = Modifier.weight(1f)) {
                     Overline("Beats per minute")
-                    val subtitle = if (selectedDay == LocalDate.now()) {
+                    val subtitle = if (selectedDay == today) {
                         "5-minute average | since midnight"
                     } else {
                         "5-minute average | selected day"
@@ -649,7 +665,9 @@ private fun SourceRow(
 
 @Composable
 private fun ReadinessSection(days: List<DailyMetric>) {
-    val todayKey = java.time.LocalDate.now().toString()
+    // Logical day (rolls at 04:00 local), so readiness keeps reading the evening's row in the small
+    // hours instead of an empty new-calendar-day row (#144). Mirrors the Today-row resolution.
+    val todayKey = logicalDayKeyNow()
     val readiness = remember(days, todayKey) { ReadinessEngine.evaluate(days, today = todayKey) }
     if (readiness.level == ReadinessEngine.Level.INSUFFICIENT) return
 

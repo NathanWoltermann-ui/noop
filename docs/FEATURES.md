@@ -4,9 +4,11 @@ NOOP is a standalone, fully **offline** companion app for WHOOP straps (4.0 and 
 directly with the strap over Bluetooth Low Energy — **no WHOOP account, no
 cloud** — stores everything on-device in SQLite, imports your WHOOP and Apple Health exports,
 and computes recovery, strain, HRV and sleep locally. The macOS app (in `Strand/`) is the
-reference implementation; Android (in `android/`) is a full, shipped app, and iOS is a
-build-from-source-only target (build it yourself in Xcode — see [docs/IOS.md](IOS.md); not on the
-App Store/TestFlight to stay anonymous). It shares NOOP's analysis code, so its results match
+reference implementation (installable via the Homebrew cask); Android (in `android/`) is a full,
+shipped app (sideload the `.apk`); and iOS ships as an **unsigned `.ipa` you sideload** with
+AltStore/SideStore — signed on your own iPhone with your own free Apple ID, so there's no App
+Store or developer account and NOOP stays anonymous (see [docs/IOS.md](IOS.md); you can still
+build it yourself in Xcode). It shares NOOP's analysis code, so its results match
 macOS; it is newer and less battle-tested, with live BLE on a physical iPhone not yet fully
 validated.
 
@@ -16,7 +18,7 @@ validated.
 > respiration, skin temperature) is an approximation, not a clinical reading, and must not be
 > used to diagnose, treat or make health decisions.
 
-NOOP is built on community reverse-engineering work, with thanks to:
+NOOP is built on community interoperability and protocol-documentation work, with thanks to:
 
 | Project | Contribution |
 | --- | --- |
@@ -37,7 +39,7 @@ Screens are grouped below by whether they need a connected strap:
 
 | Needs a connected strap (live BLE) | Works from imported data alone |
 | --- | --- |
-| Live, Breathe (for haptics), Intervals (for haptics), Health Monitor (live HR), Automations (to act), Notifications (to buzz) | Control Center, Explore, Compare, Insights, Sleep, Trends, Workouts, Stress, Apple Health, Data Sources |
+| Live, Breathe (for haptics), Intervals (for haptics), Health Monitor (live HR), Automations (to act), Notifications (to buzz) | Control Center, Explore, Compare, Insights, Sleep, Trends, Workouts, Stress, Mind, Apple Health, Data Sources |
 
 Most of NOOP works the moment you import an export. The strap adds the *live* layer — real-time
 heart rate, haptic cues, and physical-input automations.
@@ -151,6 +153,9 @@ pace your breath with a felt cue and watch your HRV respond in real time.
 - **Coherence estimate** — a normalized bar (RMSSD mapped 0–120 ms) with a band word (Building /
   Settling / Coherent / Deep calm). This is an estimate, not a clinical reading — trends across a
   session matter more than any single number.
+- **Pre/post outcome** — at the end of a session NOOP shows a **before vs after HRV (RMSSD)**
+  read, so you can see how much the breathing actually settled you. An estimate, not a clinical
+  reading.
 
 A "Test buzz" button fires a single pulse (bonded only).
 
@@ -237,7 +242,8 @@ Sparse series auto-widen so they still overlay against dense ones.
 
 **Sidebar: Sleep · works from imported WHOOP data.**
 
-`SleepView.swift` — last night, read in two seconds:
+`SleepView.swift` — last night, read in two seconds — and **browse back through past nights**, not
+just the most recent (step through earlier nights to compare):
 
 - **Stage breakdown hero** — a **hypnogram** (reconstructed from stage durations) or, if intervals
   can't be reconstructed, a proportional stacked stage bar. Footer shows REM / Deep / Light / Awake
@@ -322,6 +328,23 @@ band and one plain-English line on *why*:
 
 ---
 
+## Mind
+
+**Sidebar: Mind · works from imported data; logs your own daily check-in.**
+
+A quick **daily mood check-in** and a place to see how it tracks against your body's signals over
+time:
+
+- **Daily mood check-in** — log how you feel each day in a few taps. Stored on-device alongside
+  the rest of your history.
+- **Correlations** — once you've logged enough days, NOOP lines your mood up against your own
+  **recovery, sleep, HRV** and other metrics, so you can see what actually moves it (e.g. "lower
+  HRV days tend to read lower mood").
+- **Non-clinical by design** — this is a personal self-reflection log, **not** a mental-health
+  assessment, diagnosis or therapy. It never leaves your device.
+
+---
+
 ## Apple Health
 
 **Sidebar: Apple Health · works from imported Apple Health data.**
@@ -356,6 +379,11 @@ how many days and sleeps are stored.
 Import an Apple Health export (`export.zip`) from *Health app → profile → Export All Health Data*.
 NOOP **streams and aggregates** it locally — years of HR, HRV, sleep, SpO₂, steps, body
 composition and more. Large exports take a minute or two.
+
+### Nutrition (CSV)
+Import a daily-nutrition CSV exported from **Cronometer** or **MacroFactor** to bring calories and
+macros onto the same timeline as your recovery, sleep and HRV — so you can explore and correlate
+food against how you feel. Parsed locally; nothing is uploaded.
 
 ### WHOOP Strap (Live BLE)
 Shows whether the strap is bonded and streaming. Pairs directly over Bluetooth — no WHOOP app,
@@ -460,7 +488,13 @@ of history. On-device and approximate — informational only, **not** a diagnosi
 
 - **Profile** — age, sex, weight, height, and max heart rate (auto-estimated via Tanaka, or a
   manual override). These power your zones, calorie estimates and recovery baselines.
+- **Step calibration** — tune the stride/step estimate to your own walking so step and distance
+  figures read closer to reality.
+- **Units** — choose your preferred measurement units (metric / imperial) across the app.
 - **Strap** — connection status, battery, and Re-scan / Disconnect controls.
+- **Export for Shortcuts (iOS)** — a **HealthKit-free** path that hands your NOOP metrics to Apple
+  Health via the Shortcuts app, so an anonymous build (with no HealthKit entitlement) can still get
+  data into Health on your terms.
 - **About** — version, the "all your data, none of the cloud" note, a **medical disclaimer**, and
   attribution to the community protocols NOOP is built on.
 
@@ -481,7 +515,7 @@ feed, refresh battery, scan/reconnect, or disconnect.
 
 `SupportView.swift`:
 
-- **Built on** — credit to the community reverse-engineering projects NOOP stands on.
+- **Built on** — credit to the community interoperability projects NOOP stands on.
 - **Donate (optional)** — never a paywall; the whole app works without it. Copy-to-clipboard
   crypto addresses (Bitcoin, Cardano, Ethereum, XRP) for anyone who wants to chip in toward
   future work (Windows, deeper iOS hardware validation, new features). The app never asks again.

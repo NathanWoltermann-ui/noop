@@ -86,13 +86,21 @@ fun SleepScreen(vm: AppViewModel) {
     val days by vm.recentDays.collectAsStateWithLifecycle()
     val live by vm.live.collectAsStateWithLifecycle()
 
-    // Every recorded night, oldest→newest — the hero's ◀/▶ chevrons walk this whole list,
-    // not a fixed 3-day window (#160). Keyed on `days` so a sync/import (which always
-    // rewrites dailyMetric too) reloads; sleepSessionsMerged has no Flow.
+    // Every recorded sleep BLOCK, oldest→newest — the hero's ◀/▶ chevrons walk this whole list,
+    // including same-day naps / split sleep that `sleepSessionsMerged` collapses to one-per-night
+    // for the dashboard (#170). Derived un-deduplicated: every imported session, plus the computed
+    // "-noop" sessions on days the import doesn't cover (imported-wins / computed-fills, mirroring
+    // mergeSleep but WITHOUT the per-night collapse). Keyed on `days` so a sync/import (which always
+    // rewrites dailyMetric too) reloads; these reads have no Flow. (#160, #170)
     var sleeps by remember { mutableStateOf<List<SleepSession>>(emptyList()) }
     LaunchedEffect(days) {
         sleeps = runCatching {
-            vm.repo.sleepSessionsMerged("my-whoop", 0L, System.currentTimeMillis() / 1000L)
+            val now = System.currentTimeMillis() / 1000L
+            val imported = vm.repo.sleepSessions("my-whoop", 0L, now)
+            val computed = vm.repo.sleepSessions(vm.repo.computedDeviceId("my-whoop"), 0L, now)
+            val importedDays = imported.map { AnalyticsEngine.dayString(it.endTs) }.toHashSet()
+            val computedOnly = computed.filter { AnalyticsEngine.dayString(it.endTs) !in importedDays }
+            (imported + computedOnly).sortedBy { it.startTs }
         }.getOrDefault(emptyList())
     }
 
