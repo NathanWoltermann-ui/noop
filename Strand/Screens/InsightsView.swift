@@ -136,7 +136,7 @@ struct InsightsView: View {
     @State private var importedQuestions: [String] = []
     /// The selected day's native answers (question → answeredYes) — drives the chip state.
     @State private var dayAnswers: [String: Bool] = [:]
-    /// 0 = today, 1 = yesterday (late logging).
+    /// -1 = tomorrow (log ahead), 0 = today, 1 = yesterday (late logging).
     @State private var journalDayOffset = 0
 
     var body: some View {

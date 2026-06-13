@@ -36,6 +36,12 @@ struct TodayView: View {
     @State private var workouts: [WorkoutRow] = []
     @State private var appleDays: [AppleDaily] = []
 
+    // The Rest SCORE (0–100) for the logical day — IntelligenceEngine's Rest composite, written to the
+    // `sleep_performance` metric series (imported export wins, computed strap fills). The Key-Metrics
+    // "Rest" tile shows THIS, formatted like Charge/Effort, with hours-in-bed kept as the caption — the
+    // tile previously showed hours where the score belonged (#248). nil until loaded / no night yet.
+    @State private var restScore: Double?
+
     // Today's heart rate as 5-minute bucket means (midnight → now), for the 24h trend chart.
     @State private var hrPoints: [TrendPoint] = []
 
@@ -401,9 +407,9 @@ struct TodayView: View {
                 .overlay(alignment: .topTrailing) { scoreInfoButton(.effort) }
                 StatTile(
                     label: "Rest",
-                    value: sleepValue(d),
-                    caption: d?.efficiency.map { String(format: "%.0f%% eff", $0) },
-                    accent: StrandPalette.textPrimary,
+                    value: restScore.map { "\(Int($0.rounded()))%" } ?? "—",
+                    caption: restCaption(d),
+                    accent: restScore.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
                     sparkline: sparks["sleep_total_min"],
                     sparkColor: StrandPalette.metricPurple
                 )
@@ -648,6 +654,13 @@ struct TodayView: View {
         sparks["weight"]      = await sparkValues("weight", source: "apple-health", window: 90)
         sparks["active_kcal"] = await sparkValues("active_kcal", source: "apple-health", window: 14)
 
+        // Rest SCORE for the logical day. `exploreSeries` already merges imported + computed
+        // `sleep_performance` (imported-wins), so a Bluetooth-only user sees the on-device Rest
+        // composite and an importer sees the export's figure — exactly like the Rest detail screen.
+        let restSeries = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
+        let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        restScore = restByDay[Repository.logicalDayKey(Date())] ?? restSeries.last?.value
+
         workouts = await repo.workoutRows()
         appleDays = await repo.appleDailyRows()
 
@@ -767,6 +780,14 @@ struct TodayView: View {
         guard let m = d?.totalSleepMin else { return "—" }
         let h = Int(m) / 60, mm = Int(m) % 60
         return "\(h)h \(mm)m"
+    }
+
+    /// The Rest tile's caption — hours-in-bed for the day, the figure that used to be the tile's
+    /// VALUE before #248 moved the Rest score there. Falls back to the efficiency read-out when no
+    /// duration is banked, and to nil so the tile shows no caption line at all when neither exists.
+    private func restCaption(_ d: DailyMetric?) -> String? {
+        if d?.totalSleepMin != nil { return sleepValue(d) }
+        return d?.efficiency.map { String(format: "%.0f%% eff", $0) }
     }
 
     /// Active calories (Apple) for the latest day, falling back to the sparkline tail.

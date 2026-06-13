@@ -106,8 +106,13 @@ enum ExploreRange: Int, CaseIterable, Identifiable, Hashable {
 /// MetricDetailView. A faint trailing "•" marks metrics whose series is empty.
 struct MetricExplorerView: View {
     @EnvironmentObject var repo: Repository
-    /// metric.id → whether its series is empty (loaded once, lazily).
+    /// metric.id → whether its series is empty. Filled INCREMENTALLY by `probeEmptiness()`; a metric
+    /// absent from the map simply has no empty-dot yet (rows never wait on it — see `MetricRow`).
     @State private var emptyByID: [String: Bool] = [:]
+    /// True while the empty-dot probe is still running its first pass. Drives a small inline progress
+    /// hint in the header, never gating the rows: the catalog is static, so every row's label/icon/unit
+    /// must paint immediately even before any series read returns (#199).
+    @State private var probing = true
 
     var body: some View {
         #if os(macOS)
@@ -125,6 +130,18 @@ struct MetricExplorerView: View {
 
     private var exploreScaffold: some View {
         ScreenScaffold(title: "Explore", subtitle: "Every signal, one tap deep.") {
+            // A quiet, non-blocking hint while the empty-dot probe runs its first pass. The rows below
+            // render in full immediately regardless — this only reassures during the scan, and never
+            // leaves the screen reading as a bare/empty list before the probe lands (#199).
+            if probing {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning your data…")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             ForEach(MetricCatalog.categories, id: \.self) { category in
                 let metrics = MetricCatalog.inCategory(category)
                 if !metrics.isEmpty {
@@ -156,16 +173,24 @@ struct MetricExplorerView: View {
         }
     }
 
-    /// One lightweight pass to learn which metrics have no series, so rows can flag
-    /// them with the faint trailing dot. Failures default to "has data" (no dot).
+    /// One lightweight pass to learn which metrics have no series, so rows can flag them with the
+    /// faint trailing dot. Failures default to "has data" (no dot).
+    ///
+    /// Crucially this assigns into `emptyByID` PER METRIC, not in one final batch (#199): the previous
+    /// version ran ~35 sequential `exploreSeries` reads — each hopping back to the @MainActor Repository
+    /// — before publishing a single result, so on iOS the main thread stayed busy and the freshly-pushed
+    /// list painted blank until the whole sweep finished. Publishing each result (with a `Task.yield()`
+    /// between reads so the run loop can lay the rows out) lets the catalog rows render immediately and
+    /// the dots fill in as the probe lands. Rows already render their label/icon/unit without waiting on
+    /// this — the map only ever ADDS a trailing dot.
     private func probeEmptiness() async {
-        guard emptyByID.isEmpty else { return }
-        var map: [String: Bool] = [:]
+        guard emptyByID.isEmpty else { probing = false; return }
         for metric in MetricCatalog.all {
             let s = await repo.exploreSeries(key: metric.key, source: metric.source)
-            map[metric.id] = s.isEmpty
+            emptyByID[metric.id] = s.isEmpty
+            await Task.yield()
         }
-        emptyByID = map
+        probing = false
     }
 }
 

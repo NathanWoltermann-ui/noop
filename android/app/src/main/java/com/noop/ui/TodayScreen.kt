@@ -160,6 +160,20 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         )
     }
 
+    // The Rest SCORE (0–100) for the selected day — IntelligenceEngine's Rest composite, written to the
+    // `sleep_performance` metric series. The Key-Metrics "Rest" tile shows THIS, with hours-in-bed kept
+    // as the caption; the tile previously showed hours where the score belonged (#248). resolvedSeries
+    // merges imported + computed sleep_performance (imported-wins), so an importer sees the export's
+    // figure and a Bluetooth-only user sees the on-device composite. Null until loaded / no night yet.
+    var restScoreForDay by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(days, selectedDayKey) {
+        val byDay = runCatching {
+            viewModel.repo.resolvedSeries("sleep_performance", "my-whoop", "0000-00-00", "9999-99-99")
+                .values.associate { it.first to it.second }
+        }.getOrDefault(emptyMap())
+        restScoreForDay = byDay[selectedDayKey] ?: byDay.entries.maxByOrNull { it.key }?.value
+    }
+
     // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
     // (Baselines.minNightsSeed valid nights). Show honest "calibrating — N of 4 nights" progress
     // instead of a bare "No Data" so a new BLE-only user knows scores are coming, not broken. (PR #85)
@@ -285,7 +299,7 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         // METRICS — uniform tile grid (two columns), each tile with a 14-day sparkline.
         Spacer(Modifier.height(Metrics.selectorTopUp))
         SectionHeader("Key Metrics", overline = dayLabel, trailing = "14-day trend")
-        MetricGrid(displayMetric, window, recoveryCalibration, unitSystem, weightKg, profileWeightKg, importedStepsForDay, onScoreInfo = openGuide)
+        MetricGrid(displayMetric, window, recoveryCalibration, unitSystem, weightKg, profileWeightKg, importedStepsForDay, restScoreForDay, onScoreInfo = openGuide)
         HeartRateTrendCard(viewModel, days, selectedDay, todayDate)
         TodayWorkoutsSection(footer.recentWorkouts)
         // Honest, dismissible 12-hourly donation ask — a card in the flow, never a dialog.
@@ -461,6 +475,7 @@ private fun MetricGrid(
     latestWeightKg: Double? = null,
     profileWeightKg: Double = 75.0,
     importedStepsForDay: Int? = null,
+    restScore: Double? = null,
     onScoreInfo: (ScoreSection) -> Unit = {},
 ) {
     val tiles = listOf<@Composable (Modifier) -> Unit>(
@@ -494,9 +509,9 @@ private fun MetricGrid(
             SparkStatTile(
                 modifier = m,
                 label = "Rest",
-                value = sleepValue(d),
-                caption = d?.efficiency?.let { String.format(Locale.US, "%.0f%% eff", it) },
-                accent = d?.totalSleepMin?.let { Palette.textPrimary } ?: Palette.textTertiary,
+                value = restScore?.let { "${it.roundToInt()}%" } ?: NO_DATA,
+                caption = restCaption(d),
+                accent = restScore?.let { Palette.recoveryColor(it) } ?: Palette.textTertiary,
                 spark = w.sleepMin,
                 sparkColor = Palette.metricPurple,
                 onInfo = { onScoreInfo(ScoreSection.REST) },
@@ -1118,6 +1133,17 @@ private fun sleepValue(d: DailyMetric?): String {
     val m = d?.totalSleepMin ?: return NO_DATA
     val total = m.roundToInt()
     return "${total / 60}h ${total % 60}m"
+}
+
+/**
+ * The Rest tile's caption — hours-in-bed for the day, the figure that used to be the tile's VALUE
+ * before #248 moved the Rest score there. Falls back to the efficiency read-out when no duration is
+ * banked, and to null so the tile shows no caption line when neither exists. Mirrors macOS restCaption.
+ */
+private fun restCaption(d: DailyMetric?): String? = when {
+    d?.totalSleepMin != null -> sleepValue(d)
+    d?.efficiency != null -> String.format(Locale.US, "%.0f%% eff", d.efficiency)
+    else -> null
 }
 
 // MARK: - Steps / Weight / Calories tile logic (issue #107)

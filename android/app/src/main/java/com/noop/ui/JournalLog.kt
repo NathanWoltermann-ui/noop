@@ -117,7 +117,8 @@ internal fun mergeJournalEntries(
 
 /** Importer convention (WhoopCsvImporter.parseJournal): journal day = the wake/cycle day whose
  *  morning recovery the previous ~24 h affected. "Log today" = answers about yesterday / last
- *  night, attributed to TODAY's local day key; daysBack=1 edits yesterday. */
+ *  night, attributed to TODAY's local day key; daysBack=1 edits yesterday; daysBack=-1 logs ahead
+ *  for TOMORROW (today's activities inform tomorrow's recovery). */
 internal fun journalDayKey(daysBack: Long = 0L, today: LocalDate = LocalDate.now()): String =
     today.minusDays(daysBack).toString()
 
@@ -158,7 +159,7 @@ internal fun saveHiddenJournalQuestions(context: Context, questions: List<String
  * Yes/no chips for the merged behaviour catalog + a free-text custom-question field. Tri-state:
  * no answer logged → neither chip filled; tapping the selected chip again clears the answer
  * (deletes the native row — imported rows are never touched). Day attribution follows the
- * importer's wake-day convention, with a Today/Yesterday toggle for late logging.
+ * importer's wake-day convention, with a Tomorrow/Today/Yesterday toggle for logging ahead or late.
  */
 @Composable
 fun JournalLogCard(
@@ -179,7 +180,7 @@ fun JournalLogCard(
     fun isCustom(q: String) = normJournalKey(q) in customKeys
 
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
-        // Header: title/overline on the left, the Today/Yesterday toggle (or Edit/Done) on the right.
+        // Header: title/overline on the left, the Tomorrow/Today/Yesterday toggle (or Edit/Done) on the right.
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(modifier = Modifier.weight(1f)) {
                 SectionHeader(title = "Journal", overline = "Log")
@@ -189,6 +190,8 @@ fun JournalLogCard(
             } else {
                 JournalChip("Edit", selected = false) { editing = true }
                 Spacer(Modifier.width(6.dp))
+                JournalChip("Tomorrow", selected = dayOffset == -1L) { onDayOffset(-1L) }
+                Spacer(Modifier.width(6.dp))
                 JournalChip("Today", selected = dayOffset == 0L) { onDayOffset(0L) }
                 Spacer(Modifier.width(6.dp))
                 JournalChip("Yesterday", selected = dayOffset == 1L) { onDayOffset(1L) }
@@ -197,12 +200,19 @@ fun JournalLogCard(
         NoopCard {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    if (editing)
-                        "Remove a question to tidy your list. Custom questions are deleted; the " +
-                            "built-in ones are hidden and can be restored below."
-                    else
-                        "Answers are about the night and day leading into this morning — the same " +
-                            "attribution a WHOOP export uses, so logged and imported days line up.",
+                    when {
+                        editing ->
+                            "Remove a question to tidy your list. Custom questions are deleted; the " +
+                                "built-in ones are hidden and can be restored below."
+                        dayOffset == -1L ->
+                            "Logging ahead for tomorrow: today's activities inform tomorrow's " +
+                                "recovery, just as yesterday's are reflected in today's. Tomorrow's " +
+                                "answers line up with tomorrow's morning."
+                        else ->
+                            "Answers are about the night and day leading into this morning — the " +
+                                "same attribution a WHOOP export uses, so logged and imported days " +
+                                "line up."
+                    },
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
