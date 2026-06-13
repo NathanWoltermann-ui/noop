@@ -147,12 +147,16 @@ enum DataBackup {
             return .failure("That file isn't a NOOP backup — it doesn't look like a SQLite database.")
         }
 
-        // Reject the OTHER platform's backup honestly. The magic check passes for ANY SQLite
-        // file, so an Android (Room) backup would otherwise sail through, replace the GRDB
-        // database, and strand the user after the relaunch (the GRDB migration bookkeeping is
-        // absent). Probe the schema read-only and point the user at a path that does work.
-        if backupOrigin(of: sqliteTableNames(at: source)) == .android {
-            return .failure("This looks like an Android NOOP backup, which can't be restored on macOS — the two apps store data in different database layouts. Restore it on an Android device, or import your original WHOOP or Apple Health exports here instead.")
+        // Reject any backup that isn't a clean GRDB (this-app) backup. The magic check passes for ANY
+        // SQLite file, so an Android (Room) backup — or any other SQLite file that happens to carry our
+        // table names without our `grdb_migrations` bookkeeping — would otherwise replace the live DB
+        // and leave the migrator re-running v1 forever (`table "device" already exists`, #222). A valid
+        // NOOP-Mac/iOS backup always carries `grdb_migrations`; reject everything else that holds data.
+        let backupTables = sqliteTableNames(at: source)
+        let origin = backupOrigin(of: backupTables)
+        let holdsData = backupTables.contains("device") || backupTables.contains("hrSample")
+        if origin == .android || (origin == .unknown && holdsData) {
+            return .failure("This isn't a NOOP backup from this app — it's missing the migration bookkeeping a NOOP backup carries (it looks like an Android backup or another app's database), and restoring it would strand your store. To move your history across platforms, export the WHOOP-format CSV on the other device (Settings → Export data) and import that here, or import your original WHOOP / Apple Health export.")
         }
 
         let fm = FileManager.default

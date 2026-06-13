@@ -17,6 +17,19 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.8.5 — Fixed: iPhone import, and a stuck store now self-heals
+
+- **Fixed (iPhone):** importing a WHOOP or Apple Health export could silently do nothing — iOS handed the
+  app an iCloud file that hadn't downloaded yet. NOOP now downloads a local copy first (through the system
+  Files picker), so imports actually go through. Thanks @adrnxq and @Chopin85. (#179)
+- **Fixed (iPhone):** if a NOOP backup from another platform had been restored (e.g. an Android backup onto
+  an iPhone), the app could get permanently stuck on "store not ready" — the imported database held the data
+  but not the bookkeeping NOOP's database engine needs, so it crashed on every open. NOOP now recovers
+  automatically on the next launch, and declines such a backup at import time with a clear explanation (use
+  the WHOOP-format CSV export to move history across platforms instead). Thanks @NoahMcE. (#222)
+
+---
+
 ## 2.8.4 — New: a guide to how your Charge, Effort and Rest scores work
 
 - **New:** a clear in-app guide to how NOOP's three daily scores — **Charge**, **Effort** and **Rest** —

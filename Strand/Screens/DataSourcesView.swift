@@ -99,11 +99,33 @@ struct DataSourcesView: View {
 
     private func presentImporter(_ target: ImportTarget) {
         importTarget = target
+        #if os(iOS)
+        // iOS: go through UIDocumentPickerViewController with asCopy:true (DocumentPicker) rather than
+        // SwiftUI's `.fileImporter` (#179). asCopy makes iOS DOWNLOAD an iCloud-Drive placeholder and
+        // hand us a readable local copy — `.fileImporter` instead returns a security-scoped URL that,
+        // for an undownloaded iCloud file, can't be read, and the whole import silently did nothing.
+        Task {
+            guard let url = await DocumentPicker.importFile(target.allowedContentTypes) else { return } // cancelled
+            handlePickedURL(url, for: target)
+        }
+        #else
         showingImporter = true
+        #endif
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>, for target: ImportTarget) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            handlePickedURL(url, for: target)
+        case .failure(let error):
+            // Surface the failure instead of swallowing it (#179) — a silent return read as
+            // "import does nothing", with no clue why.
+            NSLog("Import: file picker failed for \(target) — \(error.localizedDescription)")
+        }
+    }
+
+    private func handlePickedURL(_ url: URL, for target: ImportTarget) {
         switch target {
         case .whoop:
             model.importWhoop(url: url)
