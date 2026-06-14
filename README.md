@@ -518,3 +518,13 @@ under the same terms — see [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
 - [`ATTRIBUTION.md`](ATTRIBUTION.md) — full credits and licensing notes.
 - [`docs/DONATIONS.md`](docs/DONATIONS.md) — optional donation addresses (also in-app under **Support**).
 - [`project.yml`](project.yml) — XcodeGen project definition (source of `Strand.xcodeproj`).
+
+---
+
+## Activity
+
+A live snapshot of the last 30 days — issues, pull requests, pushes, and the people moving NOOP
+forward. Huge thanks to everyone filing reports, sharing strap logs, and reverse-engineering the
+protocol alongside us — this project is built on it.
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/97acba228c083adca8453a1ebf15f18dad2894be.svg "Repobeats analytics image")
