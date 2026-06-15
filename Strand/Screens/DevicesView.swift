@@ -242,7 +242,7 @@ private struct DeviceCard: View {
                         Text(device.displayName)
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
-                        Text("\(device.brand) · \(device.model)")
+                        Text(profile.displayModel)
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
@@ -250,16 +250,19 @@ private struct DeviceCard: View {
                     statePill
                 }
 
-                if !capabilityLine.isEmpty {
-                    HStack(spacing: 6) {
-                        Image(systemName: "waveform.path.ecg")
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .accessibilityHidden(true)
-                        Text(capabilityLine)
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
+                // What this device CAPTURES — honest, per-model (not the generic stored set, which would
+                // mislabel e.g. a "Blood oxygen" chip when no SpO₂ % ever comes off the strap).
+                capabilityRow(symbol: "waveform.path.ecg", text: profile.captures,
+                              tint: StrandPalette.textSecondary)
+                // What NOOP USES it for — the scores/screens this device drives.
+                capabilityRow(symbol: "bolt.fill", text: profile.powers,
+                              tint: StrandPalette.textSecondary)
+                // Honest footnote: the "*" estimates + the SpO₂/steps caveats.
+                if !profile.footnote.isEmpty {
+                    Text(profile.footnote)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 HStack {
@@ -328,20 +331,83 @@ private struct DeviceCard: View {
         SourceCoordinator.isWhoop(device) ? "applewatch.side.right" : "heart.circle"
     }
 
-    /// "Heart rate · HRV · …" from the device's capabilities, in a stable, readable order.
-    private var capabilityLine: String {
-        let order: [(Metric, String)] = [
-            (.hr, "Heart rate"), (.hrv, "HRV"), (.spo2, "Blood oxygen"),
-            (.skinTemp, "Skin temp"), (.steps, "Steps"), (.sleep, "Sleep"),
-            (.strainLoad, "Strain"),
-        ]
-        return order.filter { device.capabilities.contains($0.0) }.map(\.1).joined(separator: " · ")
+    /// The honest, per-model capability + function summary for this device's card.
+    private var profile: DeviceCapabilityProfile { .make(for: device) }
+
+    /// One icon-prefixed info row (captures / powers), matching the card's caption style.
+    private func capabilityRow(symbol: String, text: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: symbol)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(StrandFont.caption)
+                .foregroundStyle(tint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var lastSeenLine: String {
         if device.status == .archived { return "Removed · data kept" }
         if isLiveConnected { return "Connected now" }
         return "Last seen \(relativeAgo(TimeInterval(device.lastSeenAt)))"
+    }
+}
+
+// MARK: - Capability profile
+
+/// Honest, per-model summary of what a device captures and what NOOP uses it for — shown on its card.
+///
+/// Derived from brand/model/sourceKind, NOT from the stored capability `Set`. The stored set is generic
+/// across WHOOP models (it would render an identical "Heart rate · HRV · Blood oxygen · Skin temp · …"
+/// line for a 4.0 and a 5/MG alike) and it mislabels: no SpO₂ **percentage** ever comes off any WHOOP
+/// strap (raw red/IR only — a real % exists only from a WHOOP CSV / Apple Health import), skin temp is a
+/// nightly ±°C sleep deviation rather than a live reading, steps are 5/MG-only and a raw motion count,
+/// and Charge/Effort/Rest are NOOP-derived scores. Verdicts are source-verified against the decode +
+/// scoring paths (the device-capability audit). `*` in a label = an on-device estimate, not a raw sensor.
+struct DeviceCapabilityProfile {
+    let displayModel: String   // clean card subtitle (replaces the redundant "WHOOP · WHOOP")
+    let captures: String       // "·"-joined honest capture labels for THIS model
+    let powers: String         // the NOOP scores / screens this device drives
+    let footnote: String       // one short honest caveat line ("*" estimates + the SpO₂/steps notes)
+
+    static func make(for d: PairedDevice) -> DeviceCapabilityProfile {
+        // Generic heart-rate strap: live HR + R-R only; drives the live console + Effort, nothing nightly.
+        // (Same WHOOP test as SourceCoordinator.isWhoop, inlined so this stays nonisolated.)
+        let isWhoop = d.id == "my-whoop" || d.brand.caseInsensitiveCompare("WHOOP") == .orderedSame
+        guard isWhoop else {
+            return DeviceCapabilityProfile(
+                displayModel: "Heart-rate strap",
+                captures: "Heart rate · HRV (live)* · Strain",
+                powers: "Powers the live console + Effort — no Charge, Rest or Sleep",
+                footnote: "Live HR + R-R only · no sleep, recovery, skin temp, SpO₂, steps or battery (those are WHOOP-only).")
+        }
+        let whoopPowers = "Powers Charge, Effort, Rest, Sleep + Health Monitor"
+        let model = d.model.lowercased()
+        // WHOOP 5.0 / MG — adds a (raw) step count the 4.0 can't read over BLE.
+        if model.contains("5") || model.contains("mg") {
+            return DeviceCapabilityProfile(
+                displayModel: "WHOOP 5.0 / MG",
+                captures: "Heart rate · HRV · Skin temp* · Resp rate* · Steps* · Sleep · Strain · Battery",
+                powers: whoopPowers,
+                footnote: "* on-device estimate — skin temp is a nightly ±°C deviation, steps are a raw motion count (#78). No SpO₂ % off the strap; import a WHOOP CSV for a real %.")
+        }
+        // WHOOP 4.0 — NOOP's primary band; no steps over BLE.
+        if model.contains("4") {
+            return DeviceCapabilityProfile(
+                displayModel: "WHOOP 4.0",
+                captures: "Heart rate · HRV · Skin temp* · Resp rate* · Sleep · Strain · Battery",
+                powers: whoopPowers,
+                footnote: "* on-device estimate — skin temp is a nightly ±°C deviation (firmware-dependent); no steps over BLE on a 4.0. No SpO₂ % off the strap; import a WHOOP CSV for a real %.")
+        }
+        // Legacy / unknown WHOOP (the seeded device, model just "WHOOP") — show only the common-to-all set.
+        return DeviceCapabilityProfile(
+            displayModel: "WHOOP",
+            captures: "Heart rate · HRV · Skin temp* · Resp rate* · Sleep · Strain · Battery",
+            powers: whoopPowers,
+            footnote: "Exact model unknown — shows what every WHOOP can do. * on-device estimate · no SpO₂ % off the strap (import a WHOOP CSV for that).")
     }
 }
 
@@ -376,6 +442,42 @@ struct SignalBars: View {
         .accessibilityHidden(true)
     }
 }
+
+// MARK: - Capability catalog (DEBUG render harness)
+
+#if DEBUG
+/// DEBUG-only: one DeviceCard per capability-profile kind so the honest per-model display can be
+/// screenshotted deterministically (`--demo-screen devicescatalog`). Same file as `DeviceCard` /
+/// `DeviceCapabilityProfile` so it can reach them. Stripped from Release.
+struct DeviceCardCatalog: View {
+    private static let whoopCaps: Set<Metric> = [.hr, .hrv, .spo2, .skinTemp, .sleep, .strainLoad]
+
+    private static func dev(_ id: String, _ brand: String, _ model: String,
+                            _ caps: Set<Metric>) -> PairedDevice {
+        PairedDevice(id: id, brand: brand, model: model, nickname: nil, peripheralId: nil,
+                     sourceKind: .liveBLE, capabilities: caps, status: .paired,
+                     addedAt: 0, lastSeenAt: 0)
+    }
+
+    var body: some View {
+        ScreenScaffold(title: "Devices",
+                       subtitle: "What each band captures — and what NOOP uses it for.") {
+            VStack(spacing: NoopMetrics.gap) {
+                DeviceCard(device: Self.dev("whoop-4d", "WHOOP", "4.0", Self.whoopCaps),
+                           isActive: true, isLiveConnected: true,
+                           onMakeActive: {}, onRename: {}, onRemove: nil)
+                DeviceCard(device: Self.dev("whoop-5d", "WHOOP", "5.0 MG",
+                                            Self.whoopCaps.union([.steps])),
+                           isActive: false, isLiveConnected: false,
+                           onMakeActive: {}, onRename: {}, onRemove: {})
+                DeviceCard(device: Self.dev("strap-d", "Polar", "H10", [.hr, .hrv]),
+                           isActive: false, isLiveConnected: false,
+                           onMakeActive: {}, onRename: {}, onRemove: {})
+            }
+        }
+    }
+}
+#endif
 
 // MARK: - Preview
 

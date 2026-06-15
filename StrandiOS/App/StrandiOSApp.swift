@@ -197,6 +197,7 @@ enum DemoScreens {
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
         case "devices":  return AnyView(DevicesView())
+        case "devicescatalog": return AnyView(DeviceCardCatalog())
         case "addwizard": return AnyView(AddWizardDemoHost())
         default:         return nil
         }
