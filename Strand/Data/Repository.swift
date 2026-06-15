@@ -177,6 +177,7 @@ final class Repository: ObservableObject {
     /// `deviceId` (and its computed sibling `deviceId + "-noop"`); these are the FIXED ids.
     static let whoopSource = "my-whoop"
     static let appleHealthSource = "apple-health"
+    static let healthConnectSource = "health-connect"
 
     /// `yyyy-MM-dd` in the device's local zone, matching how `DailyMetric.day` is stored.
     private static let dayKeyFormatter: DateFormatter = {
@@ -542,6 +543,11 @@ final class Repository: ObservableObject {
         }
         if preferredSource == appleHealthSource {
             var candidates = [MetricSourceCandidate(source: appleHealthSource, key: key)]
+            // Health Connect is an Apple-equivalent body-metric source (Android only — harmless no-op on
+            // iOS/Mac, which never write a "health-connect" series). Kept here so the resolver is
+            // byte-identical to Android's, where it makes a Health-Connect-only weight history resolve in
+            // Compare (#443). A real Apple export still wins per day; HC fills the rest.
+            candidates.append(MetricSourceCandidate(source: healthConnectSource, key: key))
             if noopComputedCanFillAppleMetric(key) {
                 candidates.append(MetricSourceCandidate(source: computedSource, key: key))
             }

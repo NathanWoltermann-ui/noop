@@ -576,6 +576,7 @@ class WhoopRepository(private val dao: WhoopDao) {
         /** Canonical source ids the resolver cross-references. The strap's real id is passed in. */
         const val WHOOP_SOURCE = "my-whoop"
         const val APPLE_HEALTH_SOURCE = "apple-health"
+        const val HEALTH_CONNECT_SOURCE = "health-connect"
 
         /** Build a repository backed by the process-wide singleton database. */
         fun from(context: Context): WhoopRepository = WhoopRepository(WhoopDatabase.get(context))
@@ -613,6 +614,11 @@ class WhoopRepository(private val dao: WhoopDao) {
             }
             if (preferredSource == APPLE_HEALTH_SOURCE) {
                 val candidates = mutableListOf(MetricSourceCandidate(APPLE_HEALTH_SOURCE, key))
+                // Health Connect is an Apple-equivalent body-metric source on Android — a real Apple
+                // EXPORT still wins per day (it's first), HC fills the rest. This is what makes a
+                // Health-Connect-only weight history visible in Compare (#443); HC now emits a "weight"
+                // metricSeries under this source from HealthConnectImporter.
+                candidates.add(MetricSourceCandidate(HEALTH_CONNECT_SOURCE, key))
                 if (noopComputedCanFillAppleMetric(key)) {
                     candidates.add(MetricSourceCandidate(computedSource, key))
                 }

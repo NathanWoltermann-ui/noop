@@ -22,6 +22,7 @@ import androidx.health.connect.client.time.TimeRangeFilter
 import com.noop.data.AppleDaily
 import com.noop.data.DailyMetric
 import com.noop.data.ImportSummary
+import com.noop.data.MetricSeriesRow
 import com.noop.data.WhoopRepository
 import com.noop.data.WorkoutRow
 import java.time.Instant
@@ -359,6 +360,12 @@ object HealthConnectImporter {
 
         val appleRows = ArrayList<AppleDaily>(acc.size)
         val dailyRows = ArrayList<DailyMetric>(acc.size)
+        // Flattened (day, "weight", kg) points so the cross-source resolver Compare reads can SEE a
+        // Health-Connect-only weight history — previously only the Apple-Health *file* importer emitted
+        // these, so HC weight showed on Today but was invisible in Compare (#443). Mirrors
+        // AppleHealthImporter's metricSeries emission; HC_DEVICE source is treated as apple-equivalent
+        // in WhoopRepository.sourceCandidates.
+        val metricSeriesRows = ArrayList<MetricSeriesRow>(acc.size)
 
         for ((day, a) in acc) {
             // AppleDaily: steps / calories / vo2max / weight / avg-HR.
@@ -379,6 +386,7 @@ object HealthConnectImporter {
                         weightKg = a.weightKg?.let { round2(it) },
                     )
                 )
+                a.weightKg?.let { metricSeriesRows += MetricSeriesRow(HC_DEVICE, day, "weight", round2(it)) }
             }
 
             // DailyMetric (my-whoop): resting-HR / HRV / sleep-minutes / SpO2 / respiration,
@@ -415,6 +423,7 @@ object HealthConnectImporter {
                 repo.upsertDevice(HC_DEVICE, name = "Health Connect")
                 repo.upsertAppleDaily(appleRows)
             }
+            if (metricSeriesRows.isNotEmpty()) repo.upsertMetricSeries(metricSeriesRows)
             if (dailyRows.isNotEmpty()) {
                 repo.upsertDevice(WHOOP, name = "WHOOP")
                 repo.upsertDailyMetrics(dailyRows)
