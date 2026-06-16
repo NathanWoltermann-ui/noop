@@ -28,6 +28,7 @@
 <p align="center">
   <a href="#keeping-noop-alive">♥&nbsp;Support</a> ·
   <a href="#download">⬇&nbsp;Download</a> ·
+  <a href="https://github.com/NoopApp/noop/wiki/FAQ">❓&nbsp;FAQ</a> ·
   <a href="https://www.reddit.com/r/NOOPApp/">💬&nbsp;Community</a> ·
   <a href="#features">Features</a> ·
   <a href="docs/PROTOCOL.md">Protocol</a> ·
