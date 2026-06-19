@@ -642,9 +642,11 @@ fun TodayScreen(
 private fun UpdateBell(unreadCount: Int, onClick: () -> Unit) {
     val label = if (unreadCount > 0) "Updates, $unreadCount unread" else "Updates"
     Box(
+        // NO .clip here: the gold count pill is offset into the top-trailing corner and must overflow
+        // the 30dp bell bounds (a CircleShape clip cut it off — only a sliver showed). There's no ripple
+        // (indication = null), so the clip served no purpose.
         modifier = Modifier
             .size(30.dp)
-            .clip(CircleShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
