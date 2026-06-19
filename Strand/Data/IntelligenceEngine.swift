@@ -460,8 +460,13 @@ final class IntelligenceEngine: ObservableObject {
         // detected twin. Sleep has no delete-reinsert pass (unlike dailyMetric/workout), so this is the
         // idempotency guard for the edited case. (#318)
         let editedWindows = editedRows.map { (start: $0.effectiveStartTs, end: $0.endTs) }
+        // #68: also drop any re-detected night the user has DELETED — a dismissedSleep tombstone keeps it
+        // from regenerating, mirroring the dismissed-WORKOUT guard above. Overlap (not exact startTs)
+        // because a re-detected onset drifts as more raw data arrives. (Android twin: dismissedWindows.)
+        let dismissedWindows = repo.dismissedSleepWindows()
+        let skipWindows = editedWindows + dismissedWindows
         let cachedSleepKept = cachedSleep.filter { s in
-            !editedWindows.contains { s.startTs < $0.end && $0.start < s.endTs }   // time-overlap test
+            !skipWindows.contains { s.startTs < $0.end && $0.start < s.endTs }   // time-overlap test
         }
         if !cachedSleepKept.isEmpty { _ = try? await store.upsertSleepSessions(cachedSleepKept, deviceId: computedId) }
         // Make re-detection idempotent across runs: clear the prior computed detected workouts in the

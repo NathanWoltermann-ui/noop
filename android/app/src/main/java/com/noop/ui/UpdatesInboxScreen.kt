@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.noop.ui
 
 import androidx.compose.foundation.layout.Arrangement
@@ -14,22 +16,29 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Done
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,6 +103,8 @@ fun UpdatesInboxScreen(
                     items = unread,
                     onTap = { handleTap(it, store, onDeepLink, onClose) },
                     onRestore = { handleRestore(it, store, onRestore, onClose) },
+                    // Swipe an unread card to mark it read (same path as a tap, just no routing).
+                    onSwipeRead = { store.markRead(it.id) },
                 )
             }
             if (read.isNotEmpty()) {
@@ -102,6 +113,8 @@ fun UpdatesInboxScreen(
                     items = read,
                     onTap = { handleTap(it, store, onDeepLink, onClose) },
                     onRestore = { handleRestore(it, store, onRestore, onClose) },
+                    // Read rows are never wrapped for swipe, so this is unused for this section.
+                    onSwipeRead = { store.markRead(it.id) },
                 )
             }
 
@@ -163,11 +176,102 @@ private fun InboxSection(
     items: List<UpdateItem>,
     onTap: (UpdateItem) -> Unit,
     onRestore: (UpdateItem) -> Unit,
+    onSwipeRead: (UpdateItem) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
         Overline(label, color = Palette.textTertiary)
         items.forEach { item ->
-            UpdateRow(item = item, onTap = { onTap(item) }, onRestore = { onRestore(item) })
+            // key(item.id) so a row that flips read→falls-out-of-this-section recomposes cleanly and
+            // its neighbours don't inherit a stale swipe state.
+            key(item.id) {
+                if (item.read) {
+                    UpdateRow(item = item, onTap = { onTap(item) }, onRestore = { onRestore(item) })
+                } else {
+                    SwipeableUnreadRow(
+                        item = item,
+                        onTap = { onTap(item) },
+                        onRestore = { onRestore(item) },
+                        onSwipeRead = { onSwipeRead(item) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Swipe-to-mark-read
+//
+// Idea credit: contributor "A" (PR #65) — swipe an inbox card to mark it read. Reimplemented under
+// the project: the original PR referenced a non-existent UpdateKind and gated its wash on the fragile
+// `state.progress` (anchor-relative in material3 1.2.1, ~1.0 at rest), so this is a from-scratch take.
+//
+// Wraps an UNREAD card in a material3 SwipeToDismissBox. A swipe in either direction marks the item
+// read via the same `UpdateStore.markRead` path a tap uses; we DON'T actually remove the row — the
+// store re-emits it as read and it slides into the "Earlier" section on the next recompose, so
+// `confirmValueChange` returns false (no real dismissal). The background wash + check glyph are gated
+// on `dismissDirection` (a robust, settle-aware signal), never on `progress`.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableUnreadRow(
+    item: UpdateItem,
+    onTap: () -> Unit,
+    onRestore: () -> Unit,
+    onSwipeRead: () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value != SwipeToDismissBoxValue.Settled) {
+                // Mark read in place; keep the row (it re-emits as read), so reject the dismissal.
+                onSwipeRead()
+            }
+            false
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        modifier = Modifier.clip(RoundedCornerShape(Metrics.cardRadius)),
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = true,
+        backgroundContent = { SwipeBackground(direction = dismissState.dismissDirection) },
+    ) {
+        UpdateRow(item = item, onTap = onTap, onRestore = onRestore)
+    }
+}
+
+/** The wash revealed under a swiping unread card: an accent fill with a "mark read" check, aligned to
+ *  the trailing edge of the swipe. Gated on [direction] (settle-aware) — not the fragile progress. */
+@Composable
+private fun SwipeBackground(direction: SwipeToDismissBoxValue) {
+    // Settled = nothing revealed; keep it transparent so a resting card shows no wash.
+    val alignment = when (direction) {
+        SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
+        SwipeToDismissBoxValue.EndToStart -> Alignment.CenterEnd
+        SwipeToDismissBoxValue.Settled -> Alignment.Center
+    }
+    val washColor =
+        if (direction == SwipeToDismissBoxValue.Settled) Color.Transparent else Palette.accent
+    val contentColor = if (Palette.isLight) Color.White else Palette.goldDeepText
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(Metrics.cardRadius))
+            .background(washColor)
+            .padding(horizontal = 24.dp),
+        contentAlignment = alignment,
+    ) {
+        if (direction != SwipeToDismissBoxValue.Settled) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Outlined.Done,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(Metrics.iconSmall),
+                )
+                Text("Mark read", style = NoopType.subhead, color = contentColor)
+            }
         }
     }
 }

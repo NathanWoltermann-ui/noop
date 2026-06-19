@@ -146,7 +146,8 @@ struct SleepView: View {
                 model = buildModel()
             }
             .sheet(item: $wakeEdit) { edit in
-                SleepTimeEditor(bedTs: edit.bedTs, wakeTs: edit.wakeTs) { newBedTs, newWakeTs in
+                SleepTimeEditor(bedTs: edit.bedTs, wakeTs: edit.wakeTs,
+                                onSave: { newBedTs, newWakeTs in
                     await repo.editSleepTimes(detectedStartTs: edit.detectedStartTs, oldEndTs: edit.wakeTs,
                                               storedStagesJSON: edit.stagesJSON,
                                               newStartTs: newBedTs, newEndTs: newWakeTs)
@@ -154,7 +155,14 @@ struct SleepView: View {
                     // sleep window, not just the Sleep tab's session view; then refresh the read cache.
                     await intelligence.analyzeRecent()
                     await repo.refresh()
-                }
+                }, onDelete: {
+                    // Delete = the edit path minus the re-insert: drop this session so every metric
+                    // recomputes immediately as if the night were never recorded, durably tombstoned so a
+                    // re-detect doesn't bring it back, then re-score + refresh exactly like an edit. (#68)
+                    await repo.deleteSleepSession(detectedStartTs: edit.detectedStartTs, endTs: edit.wakeTs)
+                    await intelligence.analyzeRecent()
+                    await repo.refresh()
+                })
             }
             // Manually add a missed nap (#508): same picker, but the chosen window is staged from raw and
             // stored as its OWN separate session — never folded into main sleep (which would mislabel the
@@ -1568,28 +1576,39 @@ private struct AddNapSeed: Identifiable {
 /// (bed, wake) back via `onSave`. Pure presentation + a single async save — persistence lives in the repo.
 private struct SleepTimeEditor: View {
     let onSave: (Int, Int) async -> Void
+    /// Optional destructive delete (#68). Non-nil for an existing main-sleep / nap edit (the editor then
+    /// shows a "Delete this sleep" button gated behind a confirmation); nil for the "Add a nap" sheet,
+    /// which has nothing to delete yet.
+    let onDelete: (() async -> Void)?
     private let title: LocalizedStringKey
     private let blurb: LocalizedStringKey
     private let bedLabel: LocalizedStringKey
     private let wakeLabel: LocalizedStringKey
+    private let deleteLabel: LocalizedStringKey
 
     @Environment(\.dismiss) private var dismiss
     @State private var bed: Date
     @State private var wake: Date
     @State private var saving = false
+    @State private var confirmingDelete = false
 
     /// `title`/`blurb`/`bedLabel`/`wakeLabel` default to the edit-an-existing-night wording; the
     /// "Add a nap" caller (#508) overrides them. The save logic + day-derived wake are identical either
-    /// way — adding a nap is just an edit whose "existing" window is a seed.
+    /// way — adding a nap is just an edit whose "existing" window is a seed. `onDelete` (#68) is the
+    /// optional destructive action; `deleteLabel` lets the nap editor say "Delete this nap".
     init(bedTs: Int, wakeTs: Int,
          title: LocalizedStringKey = "Edit sleep times",
          blurb: LocalizedStringKey = "Correct when you went to bed and woke. Stages are re-derived from your data; the edit is kept through the next strap sync.",
          bedLabel: LocalizedStringKey = "Asleep",
          wakeLabel: LocalizedStringKey = "Woke",
-         onSave: @escaping (Int, Int) async -> Void) {
+         deleteLabel: LocalizedStringKey = "Delete this sleep",
+         onSave: @escaping (Int, Int) async -> Void,
+         onDelete: (() async -> Void)? = nil) {
         self.onSave = onSave
+        self.onDelete = onDelete
         self.title = title; self.blurb = blurb
         self.bedLabel = bedLabel; self.wakeLabel = wakeLabel
+        self.deleteLabel = deleteLabel
         _bed = State(initialValue: Date(timeIntervalSince1970: TimeInterval(bedTs)))
         _wake = State(initialValue: Date(timeIntervalSince1970: TimeInterval(wakeTs)))
     }
@@ -1634,6 +1653,20 @@ private struct SleepTimeEditor: View {
                 }
             }
 
+            // Destructive delete for an existing night/nap (#68). Confirmation-gated so a tap can't clear
+            // a night by accident; nil for the "Add a nap" sheet (nothing to delete). Sits below the
+            // pickers, visually separated from the primary Save action.
+            if onDelete != nil {
+                Button(role: .destructive) { confirmingDelete = true } label: {
+                    Label(deleteLabel, systemImage: "trash")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.statusCritical)
+                }
+                .buttonStyle(.plain)
+                .disabled(saving)
+                .accessibilityLabel(deleteLabel)
+            }
+
             HStack(spacing: NoopMetrics.gap) {
                 Button("Cancel") { dismiss() }
                     .buttonStyle(.noopGhost)
@@ -1653,6 +1686,20 @@ private struct SleepTimeEditor: View {
         .padding(NoopMetrics.screenPadding)
         .frame(minWidth: 360)
         .background(StrandPalette.surfaceOverlay)
+        // On-brand destructive confirm — the same role-tagged .alert DevicesView uses for "Remove this
+        // device?", not a bare default. (#68 — Android parity: "Delete this sleep session?")
+        .alert("Delete this sleep session?", isPresented: $confirmingDelete) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                saving = true
+                Task {
+                    await onDelete?()
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("Removes this recorded sleep and recomputes the day without it. This can't be undone.")
+        }
     }
 }
 

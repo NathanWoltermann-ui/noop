@@ -437,6 +437,59 @@ final class Repository: ObservableObject {
         await refresh()
     }
 
+    /// Delete ONE sleep session — the `editSleepTimes` path minus the re-stage/re-insert, so the user can
+    /// clear a misread or spurious night and the day recomputes as if it were never recorded (#68; Android
+    /// parity — `WhoopRepository.deleteSleepSession`). `detectedStartTs` is the immutable detected key
+    /// (`startTs`); `endTs` is the night's span, recorded in the tombstone so the engine's overlap test
+    /// suppresses a re-detected onset that drifts second-to-second.
+    ///
+    /// Two durable effects, mirroring the workout-dismiss path:
+    ///  1. delete the row from whichever namespace OWNS it — try the computed source first, fall back to
+    ///     the imported `deviceId` only when no computed row matched, exactly as `editSleepTimes` applies
+    ///     its edit (the merged session list carries no source deviceId, so we resolve the owner here and
+    ///     never delete a coincidental same-startTs row in the other namespace);
+    ///  2. persist a `dismissedSleep` span in UserDefaults so the next `analyzeRecent` re-detection doesn't
+    ///     simply regenerate the night — the engine's sleep guard now skips any re-detected session
+    ///     overlapping a dismissed span (just as the dismissed-WORKOUT spans hide a re-derived bout).
+    /// Refreshes so the hero re-reads without the deleted night immediately.
+    func deleteSleepSession(detectedStartTs: Int, endTs: Int) async {
+        guard let store = await ensureStore() else { return }
+        // Record the durable tombstone first (idempotent) so a delete that races a recompute still wins.
+        var spans = dismissedSleepSpans
+        let token = "\(detectedStartTs):\(endTs)"
+        if !spans.contains(token) { spans.append(token); dismissedSleepSpans = spans }
+        // Delete from the namespace that actually owns the row — computed first, imported as a fallback.
+        let computedDeleted = (try? await store.deleteSleepSession(
+            deviceId: computedDeviceId, startTs: detectedStartTs)) ?? 0
+        if computedDeleted == 0 {
+            _ = try? await store.deleteSleepSession(deviceId: deviceId, startTs: detectedStartTs)
+        }
+        await refresh()
+    }
+
+    /// Durable "user deleted this night" tombstones as "startTs:endTs" strings, persisted in UserDefaults
+    /// (the macOS `CachedSleepSession` lives in the WhoopStore Journal file, which this layer must not
+    /// extend with a new table — the same reason dismissed WORKOUT spans live here, not in the DB). The
+    /// re-detector in `IntelligenceEngine.analyzeRecent` consults `dismissedSleepWindows` so a deleted
+    /// night that re-detects stays gone. (#68; Android twin: the `dismissedSleep` Room table.)
+    private var dismissedSleepSpans: [String] {
+        get { UserDefaults.standard.stringArray(forKey: Repository.dismissedSleepDefaultsKey) ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: Repository.dismissedSleepDefaultsKey) }
+    }
+
+    /// UserDefaults key holding the dismissed-sleep spans (see `dismissedSleepSpans`).
+    static let dismissedSleepDefaultsKey = "sleep.dismissedSessions"
+
+    /// Parsed dismissed-sleep windows for the engine's re-detection guard. Malformed / non-positive-width
+    /// entries are dropped so a corrupt value can never hide everything (mirrors `WorkoutSource`'s parser).
+    func dismissedSleepWindows() -> [(start: Int, end: Int)] {
+        dismissedSleepSpans.compactMap { s in
+            let parts = s.split(separator: ":")
+            guard parts.count == 2, let a = Int(parts[0]), let b = Int(parts[1]), b > a else { return nil }
+            return (a, b)
+        }
+    }
+
     /// Manually ADD a missed sleep session — typically a daytime NAP the detector didn't pick up (#508).
     /// Stages it from the raw streams over `[startTs, endTs]` (exactly the editing path's `restageFromRaw`),
     /// falling back to a single "awake" block when the strap has no dense data there yet — the post-sync

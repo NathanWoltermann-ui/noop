@@ -17,6 +17,11 @@ approximate; downloads are on the [Releases](https://noop.fans/NoopApp/noop/rele
 
 ---
 
+## 5.2.1 — delete a sleep, swipe to mark read (all platforms)
+
+- **iPhone:** delete a recorded sleep or nap from **Edit sleep times → Delete this sleep** — the day's Rest/recovery recompute without it and it's suppressed from re-detection (parity with Android). (#68)
+- **Android:** swipe an unread Updates-inbox card to mark it read (same as tapping). Reimplemented from a community contribution. (#65)
+
 ## 5.2.0 — connection & sleep fixes (all platforms)
 
 A focused fix release from the board, verified against source on all three platforms.

@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "5.2.0"
+    const val CURRENT_VERSION = "5.2.1"
 
     data class Release(
         val version: String,
@@ -36,6 +36,14 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "5.2.1",
+            title = "Delete a sleep, swipe to mark read",
+            date = "June 2026",
+            items = listOf(
+                "**Swipe an Updates card to mark it read.** Swipe any unread card in your Updates inbox and it slides into *Earlier* — same as tapping it. Thanks to a community contributor for the idea. (#65)",
+                "**iPhone parity: deleting a sleep/nap.** iPhone now lets you delete a recorded sleep or nap (you already could on Android) — removed, the day recomputes without it, and it won't come back on the next sync. (#68)",
+            )),
         Release(
             version = "5.2.0",
             title = "Connection & sleep fixes — a focused tune-up",

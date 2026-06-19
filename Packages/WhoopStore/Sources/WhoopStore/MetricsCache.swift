@@ -131,6 +131,22 @@ extension WhoopStore {
         }
     }
 
+    /// Delete ONE sleep session entirely — the delete half of `applySleepEdit` with no re-insert.
+    /// (deviceId, startTs) is the primary key, so it uniquely identifies the row, letting the user clear a
+    /// misread or spurious night so the day recomputes without it (#68/#281). Returns rows deleted (0 when
+    /// no such session). Mirrors Android `dao.deleteSleepSession(deviceId, startTs)`. The durable
+    /// "user deleted this night" tombstone that stops the recompute regenerating it lives in the
+    /// Repository layer (`dismissedSleepSpans`), exactly as the dismissed-WORKOUT span list does — this
+    /// store call only removes the row.
+    @discardableResult
+    public func deleteSleepSession(deviceId: String, startTs: Int) async throws -> Int {
+        try syncWrite { db in
+            try db.execute(sql: "DELETE FROM sleepSession WHERE deviceId = ? AND startTs = ?",
+                           arguments: [deviceId, startTs])
+            return db.changesCount
+        }
+    }
+
     /// Manually ADD a sleep session the detector missed — typically a daytime NAP (#508). Inserts a NEW
     /// row keyed by the chosen `startTs`, flagged `userEdited = 1` so the post-sync recompute's overlap
     /// guard preserves it (drops any later re-detected session overlapping its window) exactly as it
