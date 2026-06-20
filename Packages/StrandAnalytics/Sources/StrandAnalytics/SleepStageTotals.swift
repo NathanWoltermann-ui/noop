@@ -71,26 +71,43 @@ public enum SleepStageTotals {
     }
 
     /// The night's daily sleep aggregate, substituting any USER-EDITED block for its detected twin
-    /// before summing. `detected` is the auto-detected blocks (their stable startTs + stages); `edited`
-    /// maps a block's startTs → its hand-corrected (reshaped) stages. A wake-time edit never moves
-    /// startTs, so the edited block lands exactly on its detected twin. Returns the aggregate plus
-    /// whether an edit actually applied (so the caller only overrides the day when it did), or nil when
-    /// nothing decodes. This is the integration seam between the edit and the daily recompute — kept
-    /// pure so it's unit-tested with synthetic data, no store or stager needed.
+    /// before summing, then UNIONING in any user-added block that has no detected twin. `detected` is
+    /// the auto-detected blocks (their stable startTs + stages); `edited` maps a block's startTs → its
+    /// hand-corrected (reshaped) stages — a wake-time edit never moves startTs, so the edited block
+    /// lands exactly on its detected twin. `manual` is user-added blocks (e.g. a hand-logged nap) that
+    /// the detector never found; each is keyed by its own stable startTs and FOLDED IN so its minutes
+    /// count toward the day's totals (a detector-found nap already folds via `detected`). De-duped by
+    /// startTs so a block already represented in `detected` (or substituted via `edited`) is never
+    /// double-counted. Returns the aggregate plus whether an edit OR a manual block actually contributed
+    /// (so the caller only overrides the day when it did), or nil when nothing decodes. This is the
+    /// integration seam between the edit and the daily recompute — kept pure so it's unit-tested with
+    /// synthetic data, no store or stager needed. (#518 / #508)
     public static func dailyAggregateHonoringEdits(
         detected: [(startTs: Int, stagesJSON: String?)],
-        edited: [Int: String?]
+        edited: [Int: String?],
+        manual: [(startTs: Int, stagesJSON: String?)] = []
     ) -> (sleep: DailySleep, editApplied: Bool)? {
         // Substitute an edited block's stages ONLY when the edit has usable (non-nil) stages — an edit
         // that reshaped to nil must fall back to the detected stages, never drop the block (which would
         // collapse the night's sleep total). `editApplied` likewise reflects a real substitution.
         var applied = false
-        let effective: [String?] = detected.map { d in
+        var effective: [String?] = detected.map { d in
             if let stages = edited[d.startTs] ?? nil {   // flatten String?? → String?, then require non-nil
                 applied = true
                 return stages
             }
             return d.stagesJSON
+        }
+        // Union: a user-added block the detector never found (no detected twin) must still fold its
+        // minutes into the day, otherwise a manually-logged nap is silently dropped from Rest. Match on
+        // the stable startTs and add ONLY rows absent from `detected` (so a detector-found block already
+        // summed above is never double-counted), and only when the block has usable (non-nil) stages.
+        let detectedStarts = Set(detected.map(\.startTs))
+        for m in manual where !detectedStarts.contains(m.startTs) {
+            if let stages = m.stagesJSON {
+                effective.append(stages)
+                applied = true
+            }
         }
         guard let agg = dailyAggregate(effective) else { return nil }
         return (agg, applied)

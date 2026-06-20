@@ -366,11 +366,15 @@ struct SleepView: View {
     /// never touches the night's main hypnogram and the awake daytime is never mislabelled as light sleep.
     @ViewBuilder
     private func napSection(_ night: Night) -> some View {
-        // The main block is the night's longest (the `editTarget`); everything else on the day is a nap.
+        // The main block is the night's main sleep (the `editTarget`); everything else on the day is a
+        // nap. The day's Rest total sums BOTH (AnalyticsEngine), so the summary line makes the split
+        // explainable: Main X / Nap(s) Y / Total Z. (#508, #518)
         let main = night.editTarget
         let naps = night.sourceBlocks
             .filter { $0.startTs != main?.startTs }
             .sorted { $0.effectiveStartTs < $1.effectiveStartTs }
+        let mainMin = main.map { Double($0.endTs - $0.effectiveStartTs) / 60.0 } ?? 0
+        let napMin = naps.reduce(0.0) { $0 + Double($1.endTs - $1.effectiveStartTs) / 60.0 }
         NoopCard(padding: 14, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -383,6 +387,12 @@ struct SleepView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Add a nap")
+                }
+                // Daily split (#518): only meaningful once the day has a nap; a single-night day reads
+                // exactly as before. Total = main + naps, the time that drives the day's Rest.
+                if !naps.isEmpty {
+                    napSummaryRow(mainMin: mainMin, napMin: napMin)
+                    Divider().overlay(StrandPalette.hairline)
                 }
                 if naps.isEmpty {
                     Text("No naps recorded for this day.")
@@ -397,6 +407,28 @@ struct SleepView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// The Main / Naps / Total split for a day that has at least one nap, so what drives the day's Rest
+    /// total is explainable at a glance. Minutes formatted with the shared `durationText`. (#518)
+    @ViewBuilder
+    private func napSummaryRow(mainMin: Double, napMin: Double) -> some View {
+        HStack(spacing: 0) {
+            napSummaryCell(label: "Main sleep", value: durationText(mainMin))
+            Spacer(minLength: 8)
+            napSummaryCell(label: "Nap(s)", value: durationText(napMin))
+            Spacer(minLength: 8)
+            napSummaryCell(label: "Total", value: durationText(mainMin + napMin))
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func napSummaryCell(label: LocalizedStringKey, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).strandOverline()
+            Text(value).font(StrandFont.number(18)).foregroundStyle(StrandPalette.textPrimary)
         }
     }
 
@@ -950,33 +982,69 @@ struct SleepView: View {
         }
     }
 
-    /// Merge all of a day's blocks into ONE `Night`: stage minutes summed, each block's timeline
-    /// concatenated onto a single axis with the REAL gap between blocks preserved, efficiency
-    /// recomputed over time-in-bed (carried on the synthetic session so a navigated day never
-    /// borrows `repo.today`'s efficiency). Returns nil if no block decodes to usable stages. (#170)
+    /// The day's MAIN sleep block — the night people mean by "last night" — and the rest (naps). (#518)
+    /// A day can hold an overnight AND an afternoon nap (both end on the same calendar day, so both
+    /// bucket here). The MAIN block is the LONGEST one, preferring an OVERNIGHT-anchored block (onset in
+    /// the late-evening/early-morning window) so a long lazy afternoon nap can't out-rank a slightly
+    /// shorter real night. Picking the longest (not the latest-ending) is the #518 fix: the latest block
+    /// is the afternoon nap, which used to win and hide the overnight. `editTarget` already uses the same
+    /// longest-block rule, so the hero, the edit affordance, and this selection all agree.
+    private func mainBlock(_ sessions: [CachedSleepSession]) -> CachedSleepSession? {
+        guard !sessions.isEmpty else { return nil }
+        func duration(_ s: CachedSleepSession) -> Int { s.endTs - s.effectiveStartTs }
+        // Rank: overnight-anchored first, then by duration. An overnight block always beats a daytime
+        // one of equal/shorter length; among same-kind blocks the longer wins.
+        return sessions.max { a, b in
+            let ao = SleepView.isOvernightOnset(a.effectiveStartTs)
+            let bo = SleepView.isOvernightOnset(b.effectiveStartTs)
+            if ao != bo { return !ao && bo }   // a < b when a is daytime and b is overnight
+            return duration(a) < duration(b)
+        }
+    }
+
+    /// A nap is a short block (< `napMaxHours`), or any block that is NOT the day's main sleep — it's
+    /// daytime-onset. Computed at READ time from the day's blocks (no DB field / migration). (#518)
+    static let napMaxHours: Double = 3.0
+    /// True when a block's onset falls in the overnight window (≥ 20:00 or < 10:00 local) — the hours a
+    /// real night begins. A block onset in the afternoon is a nap, never the main night, even if long.
+    static func isOvernightOnset(_ ts: Int) -> Bool {
+        let h = Calendar.current.component(.hour, from: Date(timeIntervalSince1970: TimeInterval(ts)))
+        return h >= 20 || h < 10
+    }
+    /// Classify a block as a nap relative to the day's `main` block: it's a nap when it isn't the main
+    /// block AND it's short (< `napMaxHours`) or daytime-onset. The main block is never a nap. (#518)
+    static func isNap(_ s: CachedSleepSession, main: CachedSleepSession?) -> Bool {
+        guard let main, s.startTs != main.startTs else { return false }
+        let hours = Double(s.endTs - s.effectiveStartTs) / 3600.0
+        return hours < napMaxHours || !isOvernightOnset(s.effectiveStartTs)
+    }
+
+    /// Build the hero `Night` for a day around its MAIN sleep block (#518) — NOT a merge of the whole
+    /// day. Merging an overnight + an afternoon nap produced one impossible 1 AM→5 PM block; instead the
+    /// hero shows the main night's real hypnogram, and the naps card lists the rest. Stage minutes,
+    /// timeline, efficiency, and the editable window all come from the main block; `sourceBlocks` keeps
+    /// every block so the naps card and the daily Main/Nap/Total summary can read them. The day's Rest
+    /// total still SUMS all blocks (AnalyticsEngine) — this only fixes what the Sleep screen DISPLAYS.
+    /// Returns nil if the main block decodes to no usable stages. (#170, #318, #518)
     private func mergeDay(_ sessions: [CachedSleepSession]) -> Night? {
-        guard let first = sessions.first,
-              let last = sessions.max(by: { $0.endTs < $1.endTs }) else { return nil }
-        // Use the EFFECTIVE onset (the user's corrected bedtime when present) so the merged night's
-        // timeline base, the "Asleep" label, and the hypnogram clock all reflect the edit. (#318)
-        let onset = first.effectiveStartTs, wake = last.endTs
+        guard let main = mainBlock(sessions) else { return nil }
+        // Use the EFFECTIVE onset (the user's corrected bedtime when present) so the night's timeline
+        // base, the "Asleep" label, and the hypnogram clock all reflect the edit. (#318)
+        let onset = main.effectiveStartTs, wake = main.endTs
         var stages = Stages(awake: 0, light: 0, deep: 0, rem: 0)
         var segs: [SleepInterval] = []
-        for s in sessions {
-            let shift = TimeInterval(s.effectiveStartTs - onset)
-            if let seg = decodeSegments(s.stagesJSON, sessionStart: s.effectiveStartTs), seg.stages.total > 0 {
-                stages.awake += seg.stages.awake; stages.light += seg.stages.light
-                stages.deep  += seg.stages.deep;  stages.rem   += seg.stages.rem
-                for iv in seg.intervals {
-                    segs.append(SleepInterval(stage: iv.stage, start: iv.start + shift, end: iv.end + shift))
-                }
-            } else if let st = decodeStages(s.stagesJSON), st.total > 0 {
-                stages.awake += st.awake; stages.light += st.light
-                stages.deep  += st.deep;  stages.rem   += st.rem
+        if let seg = decodeSegments(main.stagesJSON, sessionStart: main.effectiveStartTs), seg.stages.total > 0 {
+            stages.awake += seg.stages.awake; stages.light += seg.stages.light
+            stages.deep  += seg.stages.deep;  stages.rem   += seg.stages.rem
+            for iv in seg.intervals {
+                segs.append(SleepInterval(stage: iv.stage, start: iv.start, end: iv.end))
             }
+        } else if let st = decodeStages(main.stagesJSON), st.total > 0 {
+            stages.awake += st.awake; stages.light += st.light
+            stages.deep  += st.deep;  stages.rem   += st.rem
         }
         guard stages.asleep > 0 else { return nil }
-        let eff = stages.total > 0 ? stages.asleep / stages.total : nil   // fraction ≤ 1
+        let eff = main.efficiency ?? (stages.total > 0 ? stages.asleep / stages.total : nil)
         let synth = CachedSleepSession(startTs: onset, endTs: wake, efficiency: eff,
                                        restingHr: nil, avgHrv: nil, stagesJSON: nil)
         let realSegs = segs.count >= 2 ? segs.sorted { $0.start < $1.start } : nil
@@ -999,15 +1067,14 @@ struct SleepView: View {
         return mergeDay(days[offset])
     }
 
-    /// A synthetic session spanning the DAY `offset` stops back (onset of its first block → wake of
-    /// its last), for the honest no-stage-data header when a day's blocks don't decode to usable
-    /// stages. (#160, #170)
+    /// A synthetic session for the DAY `offset` stops back, spanning the MAIN block's window (not the
+    /// whole day), for the honest no-stage-data header when the day's blocks don't decode to usable
+    /// stages. Using the main block (#518) keeps the stub header on the real night rather than a
+    /// 1 AM→5 PM overnight+nap span. (#160, #170)
     private func sessionRow(at offset: Int) -> CachedSleepSession? {
         let days = navDays
-        guard offset >= 0, offset < days.count,
-              let first = days[offset].first,
-              let last = days[offset].max(by: { $0.endTs < $1.endTs }) else { return nil }
-        return CachedSleepSession(startTs: first.startTs, endTs: last.endTs,
+        guard offset >= 0, offset < days.count, let main = mainBlock(days[offset]) else { return nil }
+        return CachedSleepSession(startTs: main.effectiveStartTs, endTs: main.endTs,
                                   efficiency: nil, restingHr: nil, avgHrv: nil, stagesJSON: nil)
     }
 
@@ -1469,11 +1536,18 @@ private struct Night {
     /// rather than re-scanning by wake time. (#318)
     var sourceBlocks: [CachedSleepSession] = []
 
-    /// The real stored block a sleep-time edit writes against — the longest (main) block of the night,
+    /// The real stored block a sleep-time edit writes against — the day's MAIN block (the longest,
+    /// preferring an OVERNIGHT-anchored block so a long afternoon nap can't out-rank the real night),
     /// resolved by identity. Its `startTs` is always a genuine detected key, so `applySleepEdit` matches.
-    /// nil when there's no underlying block (a synthetic stub) — the edit affordance is then hidden.
+    /// nil when there's no underlying block (a synthetic stub) — the edit affordance is then hidden. The
+    /// same selection backs the hero hypnogram and the naps card, so all three agree. (#318, #518)
     var editTarget: CachedSleepSession? {
-        sourceBlocks.max { ($0.endTs - $0.effectiveStartTs) < ($1.endTs - $1.effectiveStartTs) }
+        sourceBlocks.max { a, b in
+            let ao = SleepView.isOvernightOnset(a.effectiveStartTs)
+            let bo = SleepView.isOvernightOnset(b.effectiveStartTs)
+            if ao != bo { return !ao && bo }
+            return (a.endTs - a.effectiveStartTs) < (b.endTs - b.effectiveStartTs)
+        }
     }
 
     /// Total time in bed in minutes (from reconstructed stages).

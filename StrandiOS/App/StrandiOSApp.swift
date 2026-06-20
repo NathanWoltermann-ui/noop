@@ -30,6 +30,11 @@ struct StrandiOSApp: App {
         // silent no-op (PendingIntents, WidgetSnapshot.publish, Live Activity) can mask the issue as
         // "the widget doesn't show anything yet." No-op in Release.
         WidgetSnapshot.assertGroupProvisioned()
+        // #510: register the scheduled debug auto-export's BGTask handler BEFORE launch finishes — iOS
+        // only delivers a background task whose identifier was registered at launch AND listed in the
+        // target's BGTaskSchedulerPermittedIdentifiers (project.yml). Without this the overnight drop
+        // never fires; the macOS timer, foreground catch-up, and "Run now" already work without it.
+        ScheduledDebugExport.register()
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         _health = StateObject(wrappedValue: HealthKitBridge(

@@ -414,7 +414,9 @@ fun TrendChip(text: String, color: Color = Palette.textTertiary, modifier: Modif
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         if (symbol != null) Text(symbol, style = NoopType.captionNumber.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold), color = color)
-        Text(text, style = NoopType.captionNumber, color = color, maxLines = 1)
+        // Ellipsize rather than overflow if a caller constrains the chip's width (e.g. the workout
+        // tiles' compactDelta path) — keeps the pill inside its share of the row (#332).
+        Text(text, style = NoopType.captionNumber, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -466,6 +468,11 @@ fun StatTile(
     delta: String? = null,
     deltaColor: Color = Palette.textTertiary,
     tint: Color? = null,
+    // When true, the trailing delta chip yields width to the value instead of taking its full
+    // intrinsic size. Used by the workout tiles, where a wide kcal chip (e.g. "1234 kcal") was
+    // starving the duration column and clipping it to "4…"/"2…" on narrow phones (#332). The
+    // default keeps the sparkline key-metric tiles (Rest/Respiratory/HRV) exactly as they were.
+    compactDelta: Boolean = false,
 ) {
     // Each tile borrows its accent as a faint card wash, so a metric reads as part of its
     // colour world while staying legible on the deep blue-black. Falls back to the accent.
@@ -488,7 +495,14 @@ fun StatTile(
                 )
                 if (delta != null) {
                     Spacer(Modifier.width(8.dp))
-                    TrendChip(text = delta, color = deltaColor)
+                    // In compact mode the chip shares the row's remaining space (fill = false, so it
+                    // never grows past its content) — this guarantees the weighted value column keeps
+                    // its half and the duration reads in full beside the kcal chip (#332).
+                    TrendChip(
+                        text = delta,
+                        color = deltaColor,
+                        modifier = if (compactDelta) Modifier.weight(1f, fill = false) else Modifier,
+                    )
                 }
             }
             if (caption != null) {

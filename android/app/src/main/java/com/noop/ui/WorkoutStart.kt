@@ -214,8 +214,8 @@ fun WorkoutStartSection(vm: AppViewModel) {
 
 /**
  * A thin scroll indicator drawn on the right edge of a vertically-scrolling container, so a capped
- * list — like the ~80-sport picker (#265) — visibly reads as scrollable rather than complete.
- * Only paints when there is overflow.
+ * list — like the named-sport picker (~25 sports, WorkoutSport.all) — visibly reads as scrollable
+ * rather than complete. Only paints when there is overflow.
  */
 private fun Modifier.simpleVerticalScrollbar(state: ScrollState, width: Dp = 3.dp): Modifier =
     drawWithContent {

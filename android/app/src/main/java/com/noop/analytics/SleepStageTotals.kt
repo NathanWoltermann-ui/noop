@@ -111,19 +111,26 @@ object SleepStageTotals {
 
     /**
      * The night's daily sleep aggregate, substituting any USER-EDITED block for its detected twin before
-     * summing. [detected] is the auto-detected blocks (their stable startTs + stages); [edited] maps a
-     * block's startTs → its hand-corrected (reshaped) stages. A bed/wake-time edit never moves startTs,
-     * so the edited block lands exactly on its detected twin. Returns the aggregate plus whether an edit
-     * actually applied (so the caller only overrides the day when it did), or null when nothing decodes.
+     * summing, then UNIONING in any user-added block that has no detected twin. [detected] is the
+     * auto-detected blocks (their stable startTs + stages); [edited] maps a block's startTs → its
+     * hand-corrected (reshaped) stages — a bed/wake-time edit never moves startTs, so the edited block
+     * lands exactly on its detected twin. [manual] is user-added blocks (e.g. a hand-logged nap) the
+     * detector never found; each is keyed by its own stable startTs and FOLDED IN so its minutes count
+     * toward the day's totals (a detector-found nap already folds via [detected]). De-duped by startTs
+     * so a block already in [detected] (or substituted via [edited]) is never double-counted. Returns the
+     * aggregate plus whether an edit OR a manual block actually contributed (so the caller only overrides
+     * the day when it did), or null when nothing decodes.
      *
-     * Faithful twin of Swift `dailyAggregateHonoringEdits`: substitute an edited block's stages ONLY
-     * when the edit has usable (non-null) stages — an edit that reshaped to null must fall back to the
-     * detected stages, never DROP the block (which would collapse the night's sleep total). `editApplied`
-     * likewise reflects a real substitution. Pure: unit-tested with synthetic data, no store/stager.
+     * Faithful twin of Swift `dailyAggregateHonoringEdits` (#518 / #508): substitute an edited block's
+     * stages ONLY when the edit has usable (non-null) stages — an edit that reshaped to null must fall
+     * back to the detected stages, never DROP the block (which would collapse the night's sleep total).
+     * `editApplied` likewise reflects a real substitution or a folded manual block. Pure: unit-tested
+     * with synthetic data, no store/stager.
      */
     fun dailyAggregateHonoringEdits(
         detected: List<Pair<Long, String?>>,
         edited: Map<Long, String?>,
+        manual: List<Pair<Long, String?>> = emptyList(),
     ): HonoredAggregate? {
         var applied = false
         val effective = detected.map { (startTs, detectedStages) ->
@@ -137,6 +144,18 @@ object SleepStageTotals {
                 editStages
             } else {
                 detectedStages
+            }
+        }.toMutableList()
+        // Union: a user-added block the detector never found (no detected twin) must still fold its
+        // minutes into the day, otherwise a manually-logged nap is silently dropped from Rest. Match on
+        // the stable startTs and add ONLY rows absent from [detected] (so a detector-found block already
+        // summed above is never double-counted), and only when the block has usable (non-null) stages.
+        val detectedStarts = detected.map { it.first }.toHashSet()
+        for ((startTs, manualStages) in manual) {
+            if (startTs in detectedStarts) continue
+            if (manualStages != null) {
+                effective.add(manualStages)
+                applied = true
             }
         }
         val agg = dailyAggregate(effective) ?: return null

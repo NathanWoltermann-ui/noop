@@ -81,6 +81,12 @@ data class SleepMark(
         /** Capture a mark at the current instant. */
         fun now(type: SleepMarkType): SleepMark = SleepMark(type, System.currentTimeMillis())
 
+        /** Capture a mark at the current instant for a NON-UI caller (the double-tap automation), which
+         *  has no bedtime/wake picker. A single physical double-tap can't tell us which boundary the user
+         *  means, so default to BEDTIME — the boundary a double-tap-to-sleep gesture most naturally marks.
+         *  Additive convenience over [now]; the UI's two-button card keeps choosing the type explicitly. */
+        fun nowDefault(): SleepMark = now(SleepMarkType.BEDTIME)
+
         /** Reconstruct a mark from a persisted row — the round-trip read-back. The row carries no
          *  sub-day time, so the instant resolves to that day's LOCAL midnight; the type is exact.
          *  Returns null for a row that isn't a sleep-mark or whose day won't parse. */

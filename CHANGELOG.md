@@ -17,6 +17,40 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 5.3.0 — sleep, Charge and workouts, cleaned up (all platforms)
+
+A big bundled update that clears out a stack of reported issues in one release instead of a string of small ones. Thanks to everyone who reported these.
+
+**Sleep**
+- **Your real night shows as the night again.** When a day had an overnight sleep and an afternoon nap, the Sleep tab was picking whichever block ended *last*, so the nap won and your overnight vanished. It now picks your main sleep (the longest, overnight-anchored block) and shows a clear **Main / Nap(s) / Total** split so you can see what made up your Rest. (#518, thanks @pikapik487)
+- **Rest is honest about deep sleep now.** A night with normal REM but almost no deep used to still land in the 90s because deep and REM were pooled into one term. Deep now carries its own weight, so a low-deep night reads lower. No invented stages, the deep/light split is still the least certain thing we estimate without EEG, and we say so.
+- A manually added nap's minutes now fold into the day's Rest total (they were being dropped).
+
+**Charge**
+- **Your baseline settles in days, not weeks.** An early high reading used to anchor the baseline, and a guard meant to ignore freak nights then rejected your genuine lower nights as outliers, so Charge could sit at 1 or 2 for 2 to 3 weeks. The early-life behaviour now adapts fast and stops rejecting real nights while it's still learning. (Reported on Reddit.)
+- **New: Recalibrate Charge baseline.** A one-tap reset in Settings re-learns your baseline from tonight onward, for when it ever anchors wrong. Your data isn't deleted. (iPhone, Mac and Android.)
+
+**Workouts**
+- **A named-sport picker** when you add, edit or start a session, with **Padel** added and free text still available for anything off the list. iPhone and Mac live tracking finally get the picker Android already had. (#519)
+- Android: workout durations on the Today "Last Workouts" tiles no longer clip to "4…" next to the calorie chip. (#332)
+
+**Notifications / inbox**
+- **The "New data added" inbox spam is fixed.** It fired every time NOOP re-scored your recent days in the background, even on a week-old import with nothing new. It now announces only a genuinely newer day, once, remembers what it told you across restarts, and stops stacking duplicates. (#521, thanks @voodoomusic)
+
+**iPhone & Mac**
+- **New: a daily auto-export of your strap log.** Settings → Diagnostics, pick a time, and NOOP saves a timestamped copy once a day. Off by default, on-device. macOS runs it while NOOP is open (and catches up on launch); iOS fires it when the system next wakes the app near your time, not to the exact minute. Android already had this. (#510, thanks @maddognik)
+- The home-screen widgets and the Live Activity now read **Charge**, not Recovery, matching the rest of the app.
+
+**Android**
+- **Double-tap your strap to trigger an action** (Nothing, Buzz back, Mark a moment, Log a sleep mark, Buzz the time), with a Test button. Brings Android level with iPhone and Mac.
+- **A WHOOP 5/MG that keeps refusing to pair now tells you how to fix it** (close the official WHOOP app, hold the band until the lights flash blue, Forget This Device) instead of looping silently. (#78)
+- The home-screen widget reads Charge instead of Recovery.
+
+**Distribution**
+- AltStore updates no longer fail partway with "file doesn't exist." The iOS download is published under both filename forms so any source resolves it.
+
+Credit to @ujix for the `.noopbak` backup-export fix.
+
 ## 5.2.6 — updates check GitHub again (all platforms)
 
 NOOP's repo is back on **GitHub** (it's the canonical home again; noop.fans stays as a mirror). This points the app back at it.

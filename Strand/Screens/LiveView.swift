@@ -62,6 +62,7 @@ struct LiveView: View {
     /// Live workout mode (#238) — presents the full in-exercise screen while a manual workout is
     /// active. Auto-opens when a workout begins; closing just hides it (the workout keeps recording).
     @State private var showLiveWorkout = false
+    @State private var showStartSport = false
 
     /// Manual HRV snapshot (#127) — presents the "Take an HRV reading" screen as a sheet. Entry sits in
     /// the Session console and is only enabled while bonded (the reading needs the live R-R stream).
@@ -122,6 +123,11 @@ struct LiveView: View {
             LiveWorkoutView(onClose: { showLiveWorkout = false })
                 .environmentObject(model)
                 .environmentObject(live)
+        }
+        // Pick a named sport before starting (#519) — the live workout view then opens
+        // off the activeWorkout change above, so no extra navigation is needed here.
+        .sheet(isPresented: $showStartSport) {
+            StartWorkoutSheet { name in model.startWorkout(sport: name) }
         }
         // Manual HRV snapshot (#127) — a still, seated 60s R-R reading.
         .sheet(isPresented: $showHRVSnapshot) {
@@ -559,7 +565,7 @@ struct LiveView: View {
 
     private var sessionActions: some View {
         HStack(spacing: 10) {
-            Button { model.startWorkout() } label: {
+            Button { showStartSport = true } label: {
                 Label("Start workout", systemImage: "figure.run")
                     .lineLimit(1).minimumScaleFactor(0.7)
             }

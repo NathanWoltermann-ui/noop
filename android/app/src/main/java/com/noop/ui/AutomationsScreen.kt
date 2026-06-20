@@ -17,13 +17,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -53,6 +59,10 @@ import kotlin.math.roundToInt
 @Composable
 fun AutomationsScreen(viewModel: AppViewModel) {
     val live by viewModel.live.collectAsStateWithLifecycle()
+
+    // Double-tap action (parity since 4.2.8) — real + persisted via the ViewModel (NoopPrefs). The
+    // dispatch runs in the ViewModel on a fresh strap DOUBLE_TAP event; this card just edits the choice.
+    val doubleTapAction by viewModel.doubleTapAction.collectAsStateWithLifecycle()
 
     var stressNudge by remember { mutableStateOf(false) }
     var autoLockOnWristOff by remember { mutableStateOf(false) }
@@ -100,25 +110,40 @@ fun AutomationsScreen(viewModel: AppViewModel) {
         title = "Automations",
         subtitle = "Make the strap do things — tap to act, walk away to lock, train by feel.",
     ) {
-        // Double-tap.
+        // Double-tap (parity since 4.2.8): a real, persisted action picker bound to the ViewModel, with a
+        // Test action button. Mirrors AutomationsView.swift's Picker (Apple-applicable subset only; no
+        // lockScreen / runShortcut on Android).
         SettingsSection(
             icon = Icons.Filled.TouchApp,
             title = "Double-tap",
             blurb = "Double-tap the strap to trigger an action on this device. (The strap exposes a single double-tap gesture.)",
+            active = doubleTapAction != DoubleTapAction.NONE,
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("When I double-tap", style = NoopType.body, color = Palette.textPrimary)
+                Spacer(Modifier.weight(1f))
+                DoubleTapActionPicker(
+                    selected = doubleTapAction,
+                    onSelect = { viewModel.setDoubleTapAction(it) },
+                )
+            }
+            RowDivider()
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = { viewModel.testDoubleTapAction() },
+                    enabled = doubleTapAction != DoubleTapAction.NONE,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.accent),
+                ) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Test action", style = NoopType.body)
+                }
                 Spacer(Modifier.weight(1f))
                 StatePill(
                     if (live.bonded) "Strap bonded" else "Not connected",
                     tone = if (live.bonded) StrandTone.Positive else StrandTone.Warning,
                 )
             }
-            RowDivider()
-            Text(
-                "Currently mapped to: silence alerts. Bind more actions once the strap is connected.",
-                style = NoopType.footnote, color = Palette.textTertiary,
-            )
         }
 
         // Haptic coaching.
@@ -378,6 +403,49 @@ private fun SettingsSection(
             }
             Text(blurb, style = NoopType.subhead, color = Palette.textSecondary)
             content()
+        }
+    }
+}
+
+/** A compact dropdown that mirrors the iOS double-tap Picker: a tappable label + chevron that opens a
+ *  menu of [DoubleTapAction]s. Labels come from [DoubleTapAction.label] so both clients read the same. */
+@Composable
+private fun DoubleTapActionPicker(
+    selected: DoubleTapAction,
+    onSelect: (DoubleTapAction) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { expanded = true }
+                .background(Palette.surfaceInset)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(selected.label, style = NoopType.body, color = Palette.textPrimary)
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.Filled.ArrowDropDown,
+                contentDescription = "Choose double-tap action",
+                tint = Palette.textSecondary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            for (action in DoubleTapAction.entries) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            action.label,
+                            style = NoopType.body,
+                            color = if (action == selected) Palette.accent else Palette.textPrimary,
+                        )
+                    },
+                    onClick = { onSelect(action); expanded = false },
+                )
+            }
         }
     }
 }

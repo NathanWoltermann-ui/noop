@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "5.2.6"
+    const val CURRENT_VERSION = "5.3.0"
 
     data class Release(
         val version: String,
@@ -36,6 +36,20 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "5.3.0",
+            title = "Sleep, Charge and workouts, cleaned up",
+            date = "June 2026",
+            items = listOf(
+                "**Your Sleep tab shows your actual night now**, not an afternoon nap that happened to end later. Days with a nap get a clear Main / Nap(s) / Total split so you can see what made up your Rest. (#518)",
+                "**Rest is more honest about deep sleep.** A night with normal REM but barely any deep used to still score in the 90s. It now reflects a low-deep night properly, without inventing stages we can't actually measure.",
+                "**Charge settles in days, not weeks.** Your recovery baseline used to take 2 to 3 weeks to learn, and one high early reading could hold Charge down the whole time. It finds your real baseline fast now. And there's a new **Recalibrate Charge baseline** button in **Settings → Charge** if you ever want to reset it and re-learn from tonight. Your data isn't deleted.",
+                "**No more \"New data added\" spam.** The Updates inbox used to repeat that every time NOOP re-scored your recent days in the background, even on an old import with nothing new. Now it tells you once, only when a genuinely newer day lands. (#521)",
+                "**A real sport picker on workouts.** Add, edit or start a session and pick from a named list (Padel included), with free text still there for anything that isn't on it. (#519)",
+                "**Double-tap your strap to do something.** Pick from Nothing, Buzz back, Mark a moment, Log a sleep mark, or Buzz the time, with a Test button. Brings Android level with iPhone and Mac.",
+                "**Clearer help when a WHOOP 5/MG won't pair.** Instead of looping silently it now shows the steps to fix it: close the official WHOOP app, hold the band until the lights flash blue, then Forget This Device under Settings > Bluetooth. (#78)",
+                "Plus the home-screen widget says Charge instead of Recovery now, and workout durations stop clipping on the Today \"Last Workouts\" tiles. (#332)",
+            )),
         Release(
             version = "5.2.6",
             title = "Updates check GitHub again",

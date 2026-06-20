@@ -109,9 +109,13 @@ object IntelligenceEngine {
         // screen. Both default to no-op so existing callers / tests are unaffected.
         manualStepCoefficient: Double? = null,
         persistStepsCalibration: (StepsEstimateEngine.Calibration) -> Unit = {},
+        // Manual "Recalibrate baseline" anchor (noop.hrvBaselineEpoch, epoch SECONDS; 0 = none). The
+        // analytics layer is Context-free, so the caller reads it from SharedPreferences and passes it
+        // down to the HRV foldHistory. Default 0.0 → no recalibration, so other callers are unaffected.
+        baselineEpoch: Double = 0.0,
     ): List<Computed> = withContext(Dispatchers.Default) {
         analyzeRecentOnCpu(repo, profile, maxDays, importedDeviceId, maxHROverride, nowSeconds,
-            ownerSource, manualStepCoefficient, persistStepsCalibration)
+            ownerSource, manualStepCoefficient, persistStepsCalibration, baselineEpoch)
     }
 
     /** History span for the one-shot Effort rescore — large enough to cover any real wear history,
@@ -166,6 +170,7 @@ object IntelligenceEngine {
         ownerSource: DayOwnerSource? = null,
         manualStepCoefficient: Double? = null,
         persistStepsCalibration: (StepsEstimateEngine.Calibration) -> Unit = {},
+        baselineEpoch: Double = 0.0,
     ): List<Computed> {
         val hrvCfg = Baselines.metricCfg["hrv"] ?: return emptyList()
         val rhrCfg = Baselines.metricCfg["resting_hr"] ?: return emptyList()
@@ -199,7 +204,11 @@ object IntelligenceEngine {
         // re-score in pass 2. Collected oldest-first to match foldHistory's replay order.
         // foldHistory winsorizes outliers. days() is oldest-first (Swift ascending).
         val hist = repo.days(importedDeviceId)
-        val hrvBase1 = Baselines.foldHistory(hist.map { it.avgHrv }, hrvCfg)
+        // HRV baseline honours the manual "Recalibrate baseline" epoch (noop.hrvBaselineEpoch): pass the
+        // per-value "yyyy-MM-dd" day keys (parallel to the values) so foldHistory drops every night before
+        // the epoch. baselineEpoch is threaded down from the Context-aware caller (0.0 = no recalibration).
+        // rhr/resp/skin stay on the 2-arg fold — recalibration is HRV-only.
+        val hrvBase1 = Baselines.foldHistory(hist.map { it.avgHrv }, hist.map { it.day }, hrvCfg, baselineEpoch)
         val rhrBase1 = Baselines.foldHistory(hist.map { it.restingHr?.toDouble() }, rhrCfg)
         val baselines1 = ProfileBaselines(hrv = hrvBase1, restingHR = rhrBase1)
 
@@ -337,10 +346,16 @@ object IntelligenceEngine {
         for ((day, v) in nightlyHrvByDay) if (day !in histHrvByDay) histHrvByDay[day] = v
         for ((day, v) in nightlyRhrByDay) if (day !in histRhrByDay) histRhrByDay[day] = v
         for ((day, v) in nightlyRespByDay) if (day !in histRespByDay) histRespByDay[day] = v
-        val hrvSeq = histHrvByDay.entries.sortedBy { it.key }.map { it.value }
+        // Sort once so the HRV values + their "yyyy-MM-dd" day keys stay parallel (same order/length) for
+        // the recalibration-aware foldHistory below.
+        val hrvSorted = histHrvByDay.entries.sortedBy { it.key }
+        val hrvSeq = hrvSorted.map { it.value }
+        val hrvDayKeys = hrvSorted.map { it.key }
         val rhrSeq = histRhrByDay.entries.sortedBy { it.key }.map { it.value }
         val respSeq = histRespByDay.entries.sortedBy { it.key }.map { it.value }
-        val hrvBase2 = Baselines.foldHistory(hrvSeq, hrvCfg)
+        // HRV baseline honours the manual recalibration epoch via the parallel day keys (0.0 = none).
+        // rhr/resp/skin stay on the 2-arg fold — recalibration is HRV-only.
+        val hrvBase2 = Baselines.foldHistory(hrvSeq, hrvDayKeys, hrvCfg, baselineEpoch)
         val rhrBase2 = Baselines.foldHistory(rhrSeq, rhrCfg)
         // Resp baseline mixes imported (cloud) values with on-device RSA estimates — acceptable: the
         // z-score is scale-tolerant, foldHistory winsorizes, and respRateBpm already carries no source
@@ -698,7 +713,11 @@ object IntelligenceEngine {
         if (editsByStart.isEmpty()) return daily
         // Match the Swift seam: detected blocks keyed by their stable startTs + their re-encoded stages.
         val detectedTuples = detected.map { it.start to AnalyticsEngine.encodeStages(it.stages) }
-        val r = SleepStageTotals.dailyAggregateHonoringEdits(detectedTuples, editsByStart) ?: return daily
+        // A hand-logged nap is a userEdited row with NO detected twin — pass those twinless rows
+        // through the union channel so their minutes fold into the day's Rest total. (#518/#508)
+        val detectedStarts = detected.map { it.start }.toHashSet()
+        val manual = editsByStart.filter { it.key !in detectedStarts }.map { it.key to it.value }
+        val r = SleepStageTotals.dailyAggregateHonoringEdits(detectedTuples, editsByStart, manual) ?: return daily
         if (!r.editApplied) return daily
         val agg = r.sleep
         // Substitute ONLY the sleep-derived fields; every non-sleep field is left untouched.

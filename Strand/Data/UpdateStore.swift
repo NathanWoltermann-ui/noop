@@ -79,6 +79,15 @@ final class UpdateStore: ObservableObject {
         static let lastSeededVersion = "updates.lastSeededWhatsNewVersion"
     }
 
+    /// Inbox guard-rails (#521). Informational items (`.reading`/`.whatsNew`) are posted by background
+    /// recompute ticks, so without a cap + dedup the list grows unbounded and re-posts the same row on a
+    /// loop. We collapse an identical informational post (same kind + deepLink) landing within
+    /// `dedupWindow` into the existing row (just refresh its date) instead of appending, and we evict the
+    /// oldest informational rows beyond `maxItems`. Actionable rows (`.dismissedCard`, `.strapAlert`) are
+    /// never auto-evicted — the user owns those.
+    private static let maxItems = 50
+    private static let dedupWindow: TimeInterval = 30 * 60   // 30 minutes
+
     private init() {
         if let data = d.data(forKey: K.items),
            let decoded = try? JSONDecoder().decode([UpdateItem].self, from: data) {
@@ -98,10 +107,49 @@ final class UpdateStore: ObservableObject {
 
     // MARK: Mutations
 
-    /// Add a new item to the inbox (unread). No dedupe beyond the caller's own checks — callers that
-    /// must be idempotent (What's New seeding) guard before calling.
+    /// Add a new item to the inbox (unread). Informational rows (`.reading`/`.whatsNew`) are deduped and
+    /// capped (#521): an identical informational post (same kind + deepLink) within `dedupWindow` of an
+    /// existing one just refreshes that row's date (and re-arms its unread badge) instead of appending a
+    /// duplicate, and the informational backlog is trimmed to `maxItems` newest. Actionable rows
+    /// (`.dismissedCard`, `.strapAlert`) always append and are never auto-evicted.
     func post(_ item: UpdateItem) {
-        items.append(item)
+        if Self.isInformational(item.kind),
+           let i = items.firstIndex(where: {
+               $0.kind == item.kind && $0.deepLink == item.deepLink
+                   && item.date.timeIntervalSince($0.date) < Self.dedupWindow
+                   && item.date.timeIntervalSince($0.date) >= 0
+           }) {
+            // Collapse into the existing row: bump its date + message, re-mark unread so the badge shows.
+            items[i].date = item.date
+            items[i].title = item.title
+            items[i].message = item.message
+            items[i].read = false
+        } else {
+            items.append(item)
+        }
+        evictOverflow()
+    }
+
+    private static func isInformational(_ kind: UpdateItem.Kind) -> Bool {
+        kind == .reading || kind == .whatsNew
+    }
+
+    /// Trim the informational backlog to the newest `maxItems`. Actionable rows (`.dismissedCard`,
+    /// `.strapAlert`) are exempt — only `.reading`/`.whatsNew` are auto-evicted, oldest first.
+    private func evictOverflow() {
+        let informationalCount = items.lazy.filter { Self.isInformational($0.kind) }.count
+        guard informationalCount > Self.maxItems else { return }
+        var toRemove = informationalCount - Self.maxItems
+        // Oldest first: ascending by date, drop the leading informational rows.
+        let orderedOldest = items.enumerated().sorted { $0.element.date < $1.element.date }
+        var removeIDs = Set<UUID>()
+        for (_, item) in orderedOldest where toRemove > 0 {
+            if Self.isInformational(item.kind) {
+                removeIDs.insert(item.id)
+                toRemove -= 1
+            }
+        }
+        if !removeIDs.isEmpty { items.removeAll { removeIDs.contains($0.id) } }
     }
 
     /// Mark one item read (no-op if already read / not found).

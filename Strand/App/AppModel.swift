@@ -81,6 +81,10 @@ final class AppModel: ObservableObject {
     /// is recomputed as the window grows so the active card can show strain building in real time.
     struct ActiveWorkout: Equatable {
         let start: Date
+        /// The named sport chosen at start (e.g. "Tennis", "Padel") — persisted as the saved row's
+        /// `sport` so a live-tracked session keeps its label instead of the old generic "Workout".
+        /// Defaults to the catalogue default ("Other") when started without a pick. (#519)
+        var sport: String = WorkoutCatalog.defaultSportName
         var samples: [HRSample] = []
         var liveStrain: Double = 0
         var avgHr: Int = 0
@@ -350,12 +354,16 @@ final class AppModel: ObservableObject {
 
     // MARK: - Manual workout tracking
 
-    /// Begin a manually-tracked workout. The active card on Live then shows elapsed time, live HR and
-    /// strain building; End scores + saves it. Confirms with a single buzz.
-    func startWorkout() {
+    /// Begin a manually-tracked workout for the named `sport` (the picker passes the chosen catalogue
+    /// name; callers that don't pick a sport get the catalogue default "Other", parity with Android's
+    /// `startWorkout(sport:)`). The active card on Live then shows elapsed time, live HR and strain
+    /// building; End scores + saves it under this sport. Confirms with a single buzz. (#519)
+    func startWorkout(sport: String = WorkoutCatalog.defaultSportName) {
         guard activeWorkout == nil else { return }
         lastWorkout = nil
-        activeWorkout = ActiveWorkout(start: Date())
+        let name = sport.trimmingCharacters(in: .whitespaces)
+        activeWorkout = ActiveWorkout(start: Date(),
+                                      sport: name.isEmpty ? WorkoutCatalog.defaultSportName : name)
         buzz(loops: 1)
     }
 
@@ -377,7 +385,7 @@ final class AppModel: ObservableObject {
         let kcal = Calories.estimateBoutCalories(samples, profile: up, hrmax: Double(profile.hrMax), restingHR: nil).0
         let row = WorkoutRow(
             startTs: Int(w.start.timeIntervalSince1970), endTs: Int(end.timeIntervalSince1970),
-            sport: "Workout", source: "manual", durationS: end.timeIntervalSince(w.start),
+            sport: w.sport, source: "manual", durationS: end.timeIntervalSince(w.start),
             energyKcal: kcal > 0 ? kcal : nil, avgHr: avg, maxHr: peak, strain: strain,
             distanceM: nil, zonesJSON: nil, notes: nil)
         lastWorkout = row

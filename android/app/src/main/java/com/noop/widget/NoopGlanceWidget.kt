@@ -107,7 +107,7 @@ private fun WidgetContent(snap: WidgetSnapshot, dark: Boolean) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "RECOVERY",
+            text = "CHARGE",
             style = TextStyle(color = textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Medium),
         )
         Text(

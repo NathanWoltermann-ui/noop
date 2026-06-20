@@ -107,6 +107,31 @@ object TodayCardDismissal {
     }
 }
 
+// MARK: - New-data watermark (shared, #521)
+//
+// The persisted NEWEST day-key (max yyyy-MM-dd in the merged history) the Today inbox has already
+// announced as "New data added". TodayScreen compares the live newest key against this watermark and
+// only posts when it moves STRICTLY forward — so a background recompute's delete-then-reinsert churn
+// (which dips/recovers the row COUNT but not the newest key) never re-announces, and a relaunch over
+// the same history stays silent. Persisted (not Compose `remember`) so it survives process death,
+// mirroring the Swift `@AppStorage("today.lastAnnouncedDayKey")`.
+object NewDataWatermark {
+    private const val FILE = "noop_today_newdata"
+    private const val KEY_NEWEST = "today.lastAnnouncedDayKey"
+
+    private fun prefs(ctx: Context): SharedPreferences =
+        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    /** The last newest day-key announced, or "" when no baseline exists yet (first ever load). */
+    fun lastAnnouncedKey(ctx: Context): String =
+        prefs(ctx).getString(KEY_NEWEST, "").orEmpty()
+
+    /** Record [key] as the newest day-key seen, so only a strictly-greater key fires a future announce. */
+    fun setLastAnnouncedKey(ctx: Context, key: String) {
+        prefs(ctx).edit().putString(KEY_NEWEST, key).apply()
+    }
+}
+
 // MARK: - UpdateStore
 //
 // The bell's backing store: a single-user, on-device inbox of [UpdateItem]s persisted as a JSON array
@@ -146,11 +171,50 @@ class UpdateStore private constructor(private val prefs: SharedPreferences) {
 
     // MARK: Mutations
 
-    /** Add a new item (unread). No dedupe beyond the caller's own checks — callers that must be
-     *  idempotent (What's New seeding) guard before calling. */
+    /** Add a new item (unread). Informational rows ([UpdateKind.READING]/[UpdateKind.WHATS_NEW]) are
+     *  deduped and capped (#521): an identical informational post (same kind + deepLink) within
+     *  [DEDUP_WINDOW_MS] of an existing one just refreshes that row's date (and re-arms its unread badge)
+     *  instead of appending a duplicate, and the informational backlog is trimmed to [MAX_ITEMS] newest.
+     *  Actionable rows ([UpdateKind.DISMISSED_CARD]/[UpdateKind.STRAP_ALERT]) always append and are never
+     *  auto-evicted. Mirrors the Swift `UpdateStore.post`. */
     fun post(item: UpdateItem) {
-        items.add(item)
+        val dup = if (isInformational(item.kind)) {
+            items.indexOfFirst {
+                it.kind == item.kind && it.deepLink == item.deepLink &&
+                    (item.date - it.date) in 0 until DEDUP_WINDOW_MS
+            }
+        } else -1
+        if (dup >= 0) {
+            // Collapse into the existing row: bump its date + message, re-mark unread so the badge shows.
+            items[dup] = items[dup].copy(
+                title = item.title, message = item.message, date = item.date, read = false,
+            )
+        } else {
+            items.add(item)
+        }
+        evictOverflow()
         persist()
+    }
+
+    private fun isInformational(kind: UpdateKind): Boolean =
+        kind == UpdateKind.READING || kind == UpdateKind.WHATS_NEW
+
+    /** Trim the informational backlog to the newest [MAX_ITEMS]. Actionable rows
+     *  ([UpdateKind.DISMISSED_CARD]/[UpdateKind.STRAP_ALERT]) are exempt — only READING/WHATS_NEW are
+     *  auto-evicted, oldest first. Mirrors the Swift `evictOverflow`. */
+    private fun evictOverflow() {
+        val informationalCount = items.count { isInformational(it.kind) }
+        if (informationalCount <= MAX_ITEMS) return
+        var toRemove = informationalCount - MAX_ITEMS
+        val removeIds = mutableSetOf<String>()
+        for (it in items.sortedBy { it.date }) {           // oldest first
+            if (toRemove <= 0) break
+            if (isInformational(it.kind)) {
+                removeIds.add(it.id)
+                toRemove--
+            }
+        }
+        if (removeIds.isNotEmpty()) items.removeAll { it.id in removeIds }
     }
 
     /** Mark one item read (no-op if already read / not found). */
@@ -231,6 +295,12 @@ class UpdateStore private constructor(private val prefs: SharedPreferences) {
         private const val FILE = "noop_updates"
         private const val KEY_ITEMS = "updates.items"
         private const val KEY_LAST_SEEDED = "updates.lastSeededWhatsNewVersion"
+
+        /** Inbox guard-rails (#521). Cap the informational ([UpdateKind.READING]/[WHATS_NEW]) backlog and
+         *  collapse an identical informational post landing within this window into the existing row, so
+         *  background recompute ticks can't grow the inbox unbounded or re-post the same row on a loop. */
+        private const val MAX_ITEMS = 50
+        private const val DEDUP_WINDOW_MS = 30L * 60L * 1000L   // 30 minutes
 
         @Volatile
         private var instance: UpdateStore? = null

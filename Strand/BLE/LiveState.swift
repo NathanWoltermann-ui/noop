@@ -200,6 +200,52 @@ public final class LiveState: ObservableObject {
     public func append(log line: String) {
         log.append(Self.redactPii(line))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
+        Self.persistTail(log)
+    }
+
+    // MARK: - Durable log tail (#510, scheduled debug export)
+
+    /// The in-memory `log` lives only for the life of the process, so a scheduled debug auto-export that
+    /// fires hours after the last live session (the Apple analogue of Android's `StrapLogBuffer`) would
+    /// otherwise find nothing to write. We mirror the rolling log to a single UserDefaults key so the
+    /// scheduled export can read the last day's lines even with no live BLE session open. Small and
+    /// bounded: capped to the tail (`tailLimit`, well under `maxLogLines`) of short redacted strings, so
+    /// the persisted blob stays a few hundred KB at most. On-device only; nothing is sent anywhere.
+    private static let tailKey = "strapLog.tail"
+    /// How many recent lines the durable tail retains — a sensible day's worth for a scheduled export,
+    /// smaller than the live `maxLogLines` ring so the persisted copy stays modest.
+    static let tailLimit = 2_000
+
+    /// Mirror the most recent `tailLimit` lines to UserDefaults (called from `append`). Synchronous and
+    /// cheap (a single small array write); UserDefaults coalesces the disk flush. `nonisolated` (touches
+    /// only UserDefaults, no actor state) so the background/static export path can read the twin getter.
+    nonisolated private static func persistTail(_ lines: [String]) {
+        let tail = lines.count > tailLimit ? Array(lines.suffix(tailLimit)) : lines
+        UserDefaults.standard.set(tail, forKey: tailKey)
+    }
+
+    /// The persisted log tail, newest-last — what a scheduled export reads when no live session is open.
+    /// Empty if nothing has ever been logged on this device. `nonisolated` so a background task with no
+    /// main-actor instance can read it.
+    nonisolated public static func persistedLogTail() -> [String] {
+        (UserDefaults.standard.array(forKey: tailKey) as? [String]) ?? []
+    }
+
+    /// A shareable strap-log body sourced from the DURABLE tail, for a background / scheduled export that
+    /// runs with no live `LiveState` instance. Mirrors `exportableLogText()`'s header so a scheduled drop
+    /// reads the same as a manual share; falls back to the live `log` is not available here by design
+    /// (this is a `static` so a background task needs no main-actor instance).
+    nonisolated public static func scheduledExportText() -> String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        #if os(iOS)
+        let osName = "iOS"
+        #else
+        let osName = "macOS"
+        #endif
+        var header = "NOOP strap log (scheduled export) — \(osName)\nApp: \(v)\n\(osName): "
+            + ProcessInfo.processInfo.operatingSystemVersionString + "\n"
+        header += String(repeating: "-", count: 40) + "\n"
+        return header + persistedLogTail().joined(separator: "\n")
     }
 
     /// Scrub personal identifiers from a strap-log line so it's safe to share publicly (#445): BLE MAC

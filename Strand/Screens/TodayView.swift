@@ -93,10 +93,12 @@ struct TodayView: View {
     /// The Updates inbox sheet (opened by the header bell). Shared across both platforms.
     @State private var showUpdatesInbox = false
 
-    /// The day-count seen on the previous load, so a refresh that brings in NEW days can post a single
-    /// honest `.reading` update ("New data — N days added") to the inbox. nil until the first load
-    /// establishes a baseline (so the very first load never posts — we only announce genuine growth).
-    @State private var lastSeenDayCount: Int?
+    /// The NEWEST day-key (max yyyy-MM-dd in `repo.days`) announced to the inbox. Persisted (not @State)
+    /// so a relaunch over the same history never re-announces (#521). We trigger on a strictly-newer KEY,
+    /// not a count: a recompute that deletes-then-reinserts the window dips/recovers the count but keeps
+    /// the same max key, so churn can't masquerade as new history. Empty = no baseline yet (first load
+    /// just records the key silently — we only announce genuine forward growth).
+    @AppStorage("today.lastAnnouncedDayKey") private var lastAnnouncedDayKey = ""
 
     // Per-card "dismissed into the inbox" flags for the two Today info-cards. A small × on each card
     // sets these (and posts a `.dismissedCard` update); "Restore to Today" in the inbox flips them back
@@ -1658,15 +1660,25 @@ struct TodayView: View {
         announceNewDaysIfNeeded()
     }
 
-    /// Post a single honest `.reading` update to the inbox when a refresh brought in NEW days (a WHOOP
-    /// import or an overnight backfill). The count is real — the growth in `repo.days` since the last
-    /// load — never fabricated. Only announces genuine growth: the FIRST load (nil baseline) just sets
-    /// the baseline silently, and a navigated past day is ignored. Links to Trends.
+    /// Post a single honest `.reading` update to the inbox when a refresh brought in genuinely NEWER
+    /// history (a WHOOP import or an overnight backfill that pushed the newest day forward). We compare
+    /// the MAX day-key in `repo.days`, not the count (#521): a background recompute rebuilds the window
+    /// via delete-then-reinsert, so the count momentarily dips and recovers, but the newest key is
+    /// unchanged — so churn never fires this. The very first load (empty baseline) records the key
+    /// silently; a navigated past day is ignored; the persisted key means a relaunch over the same
+    /// history never re-announces. The count of newly-forward days is real (keys strictly above the
+    /// previous max), never fabricated. Links to Trends.
     private func announceNewDaysIfNeeded() {
-        let count = repo.days.count
-        defer { lastSeenDayCount = count }
-        guard selectedDayOffset == 0, let previous = lastSeenDayCount else { return }
-        let added = count - previous
+        guard selectedDayOffset == 0 else { return }
+        guard let newestKey = repo.days.map(\.day).max() else { return }   // no history yet
+        let previousKey = lastAnnouncedDayKey
+        defer { lastAnnouncedDayKey = newestKey }
+        // No baseline yet → record silently, never announce historical data on first sight.
+        guard !previousKey.isEmpty else { return }
+        // Only a STRICTLY newer day-key counts as new history (yyyy-MM-dd sorts chronologically).
+        guard newestKey > previousKey else { return }
+        // Honest count of how many distinct days arrived ABOVE the old watermark.
+        let added = Set(repo.days.map(\.day)).filter { $0 > previousKey }.count
         guard added > 0 else { return }
         updateStore.post(UpdateItem(
             kind: .reading,

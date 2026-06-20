@@ -101,6 +101,42 @@ public enum Baselines {
     /// Missing-night count after which a baseline is marked stale.
     public static let staleDays: Int = 14
 
+    // MARK: - Early-life anti-anchoring (Reddit HRV report)
+    //
+    // The original model seeds the center on the first valid night with spread pinned at the
+    // floor, then becomes "usable" at minNightsSeed. If those first few nights read artificially
+    // HIGH (a common cold-start artefact), three things compounded to lock the baseline high for
+    // ~2-3 weeks: (a) the seed fixed the mean high while spread sat at the floor; (b) the hard
+    // outlier gate then REJECTED the user's genuine LOWER nights (a true 54ms vs an anchored ~85ms
+    // baseline is >5× the floor spread → "seen but not folded"); (c) the still-tight spread made
+    // the z-score hypersensitive, crushing Charge to 1-2.
+    //
+    // The fix is conservative and principled: during the baseline's EARLY life let reality pull
+    // the center down quickly, THEN settle to the normal long-term smoothing.
+    //   - Skip the hard-outlier rejection while the baseline is young (nValid below the threshold)
+    //     OR while spread is still at the floor — so legitimate lower nights are never discarded
+    //     before the spread has had a chance to widen to reflect them.
+    //   - Use a faster effective center half-life for the first few nights so it tracks reality in
+    //     days, not weeks, before relaxing back to halfLifeB.
+    //   - Widen the effective spread used for Winsor clamping during early life so an honest lower
+    //     night isn't clamped flat against a floor-tight band.
+    // Long-term behaviour (after earlyAdaptNights, once spread has lifted) is byte-identical to
+    // before, so the baseline stays smooth and non-jittery once it has settled.
+
+    /// Valid-night count below which the baseline is treated as "young": fast center adaptation
+    /// and a suspended hard-outlier gate. Chosen so convergence happens in days, not weeks.
+    public static let earlyAdaptNights: Int = 8
+    /// Center half-life (nights) used while the baseline is young — much faster than halfLifeB so a
+    /// high seed is pulled toward reality within days.
+    public static let earlyHalfLifeB: Double = 3.0
+    /// Multiplier on spread for the Winsor clamp while young, so an honest lower night isn't clamped
+    /// flat against a floor-tight band before the spread has had a chance to widen.
+    public static let earlySpreadInflate: Double = 2.5
+
+    /// UserDefaults key for the manual HRV-baseline recalibration epoch (epoch SECONDS).
+    /// 0 / absent = no recalibration. Written by the Settings "Recalibrate HRV baseline" button.
+    public static let hrvBaselineEpochKey: String = "noop.hrvBaselineEpoch"
+
     /// Default per-metric configurations (HRV, resting HR, respiration, skin temp).
     public static let metricCfg: [String: MetricCfg] = [
         "hrv": MetricCfg(minVal: 5.0, maxVal: 250.0, floorSpread: 5.0,
@@ -169,8 +205,17 @@ public enum Baselines {
                                  status: computeStatus(nValid: state.nValid, nightsSinceUpdate: m))
         }
 
-        // Hard outlier rejection (only once seeded): seen, but not folded.
-        if state.nValid >= minNightsSeed {
+        // Is the baseline still "young"? While young we adapt faster and suspend the hard-outlier
+        // gate so genuine lower nights are never discarded before the spread reflects them. Tied to
+        // the valid-night count (NOT spread): a long flat history is settled even though its spread
+        // never lifted off the floor, and must still reject a wild one-off outlier.
+        let isYoung = state.nValid < earlyAdaptNights
+
+        // Hard outlier rejection (only once seeded AND no longer young): seen, but not folded.
+        // Suspending this during early life is the core anti-anchoring fix — a high seed with a
+        // floor-tight spread would otherwise reject the user's real, lower readings as "outliers"
+        // (a true 54ms vs an anchored ~90ms baseline is >5× the floor spread).
+        if state.nValid >= minNightsSeed && !isYoung {
             let dev = abs(value - state.baseline)
             if dev > hardOutlierK * state.spread {
                 return BaselineState(baseline: state.baseline, spread: state.spread,
@@ -186,10 +231,15 @@ public enum Baselines {
         }
 
         // Step 1: Winsorized EWMA update.
-        let lo = state.baseline - winsorK * state.spread
-        let hi = state.baseline + winsorK * state.spread
+        // While young, widen the clamp band (inflate the effective spread) so an honest lower night
+        // isn't clamped flat against a floor-tight band, and use the faster early center half-life so
+        // the center tracks reality in days. Both relax to the normal values once settled.
+        let effSpread = isYoung ? state.spread * earlySpreadInflate : state.spread
+        let effLb = isYoung ? lambda(halfLife: earlyHalfLifeB) : lb
+        let lo = state.baseline - winsorK * effSpread
+        let hi = state.baseline + winsorK * effSpread
         let clamped = max(lo, min(hi, value))
-        let newBaseline = lb * clamped + (1.0 - lb) * state.baseline
+        let newBaseline = effLb * clamped + (1.0 - effLb) * state.baseline
 
         // Spread uses the UNCLAMPED value so true deviations are tracked.
         let absDev = abs(value - newBaseline)
@@ -206,6 +256,49 @@ public enum Baselines {
     public static func foldHistory(_ values: [Double?], cfg: MetricCfg) -> BaselineState {
         var state: BaselineState? = nil
         for v in values { state = update(state, value: v, cfg: cfg) }
+        if let s = state { return s }
+        let seed = (cfg.minVal + cfg.maxVal) / 2.0
+        return BaselineState(baseline: seed, spread: cfg.floorSpread, nValid: 0,
+                             nightsSinceUpdate: 0, status: .calibrating)
+    }
+
+    /// Read the persisted manual-recalibration epoch (epoch SECONDS) for the HRV baseline.
+    /// 0 = no recalibration. The Settings "Recalibrate HRV baseline" button writes now-seconds here.
+    public static func hrvBaselineEpoch() -> Double {
+        UserDefaults.standard.double(forKey: hrvBaselineEpochKey)
+    }
+
+    /// Replay an ordered sequence of nightly values (oldest first) to build state, honouring a
+    /// manual recalibration `baselineEpoch` (epoch SECONDS; 0 = no recalibration).
+    ///
+    /// `dayKeys` runs parallel to `values` ("yyyy-MM-dd", same order/length). Any night whose day
+    /// STARTS before `baselineEpoch` is ignored entirely (NOT a skip-and-hold — it is dropped, so the
+    /// baseline re-seeds from the first on-or-after-epoch night). This lets the user reset a baseline
+    /// that anchored too high: tap Recalibrate, and the Charge baseline re-learns from tonight onward.
+    ///
+    /// When `baselineEpoch <= 0` (the default / no recalibration) this is byte-identical to the plain
+    /// `foldHistory(_:cfg:)`. When `baselineEpoch` is nil it is read from UserDefaults via
+    /// `hrvBaselineEpoch()` so callers that already use the HRV config get recalibration for free.
+    public static func foldHistory(_ values: [Double?], dayKeys: [String], cfg: MetricCfg,
+                                   baselineEpoch: Double? = nil) -> BaselineState {
+        let epoch = baselineEpoch ?? hrvBaselineEpoch()
+        guard epoch > 0 else { return foldHistory(values, cfg: cfg) }
+
+        // Pre-build the day-start epoch (UTC) for each "yyyy-MM-dd" key once.
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+        fmt.dateFormat = "yyyy-MM-dd"
+
+        var state: BaselineState? = nil
+        for (i, v) in values.enumerated() {
+            // Drop (not skip-and-hold) any night dated before the recalibration epoch.
+            if i < dayKeys.count, let d = fmt.date(from: dayKeys[i]),
+               d.timeIntervalSince1970 < epoch {
+                continue
+            }
+            state = update(state, value: v, cfg: cfg)
+        }
         if let s = state { return s }
         let seed = (cfg.minVal + cfg.maxVal) / 2.0
         return BaselineState(baseline: seed, spread: cfg.floorSpread, nValid: 0,

@@ -116,7 +116,11 @@ final class IntelligenceEngine: ObservableObject {
         // refresh last ran (4000 vs 120 days). This mirrors the Android port's `days(importedDeviceId)`.
         let hist = ((try? await store.dailyMetrics(deviceId: deviceId, from: "0000-01-01", to: "9999-12-31")) ?? [])
             .sorted { $0.day < $1.day }
-        let hrvBase1 = Baselines.foldHistory(hist.map { $0.avgHrv }, cfg: hrvCfg)
+        // HRV baseline honours the manual "Recalibrate baseline" epoch (noop.hrvBaselineEpoch): pass the
+        // per-value "yyyy-MM-dd" day keys (parallel to the values) so foldHistory can drop every night
+        // before the epoch. baselineEpoch defaults to nil → the overload auto-reads UserDefaults. rhr/resp/
+        // skin stay on the plain foldHistory (recalibration is HRV-only).
+        let hrvBase1 = Baselines.foldHistory(hist.map { $0.avgHrv }, dayKeys: hist.map { $0.day }, cfg: hrvCfg)
         let rhrBase1 = Baselines.foldHistory(hist.map { $0.restingHr.map(Double.init) }, cfg: rhrCfg)
         let baselines1 = AnalyticsEngine.ProfileBaselines(hrv: hrvBase1, restingHR: rhrBase1)
 
@@ -239,7 +243,8 @@ final class IntelligenceEngine: ObservableObject {
         for (day, v) in nightlyHrvByDay where histHrvByDay[day] == nil { histHrvByDay[day] = v }
         for (day, v) in nightlyRhrByDay where histRhrByDay[day] == nil { histRhrByDay[day] = v }
         for (day, v) in nightlyRespByDay where histRespByDay[day] == nil { histRespByDay[day] = v }
-        let hrvSeq = histHrvByDay.keys.sorted().map { histHrvByDay[$0]! }   // chronological [Double?]
+        let hrvDayKeys = histHrvByDay.keys.sorted()                         // chronological "yyyy-MM-dd"
+        let hrvSeq = hrvDayKeys.map { histHrvByDay[$0]! }                   // chronological [Double?]
         let rhrSeq = histRhrByDay.keys.sorted().map { histRhrByDay[$0]! }
         let respSeq = histRespByDay.keys.sorted().map { histRespByDay[$0]! }
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
@@ -254,7 +259,9 @@ final class IntelligenceEngine: ObservableObject {
         // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
         let skinFold = Baselines.foldHistory(skinSeq, cfg: skinCfg)
         let baselines2 = AnalyticsEngine.ProfileBaselines(
-            hrv: Baselines.foldHistory(hrvSeq, cfg: hrvCfg),
+            // HRV baseline honours the manual recalibration epoch via the parallel day keys (baselineEpoch
+            // defaults to nil → auto-reads UserDefaults). rhr/resp/skin stay on the plain fold (HRV-only).
+            hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg),
             restingHR: Baselines.foldHistory(rhrSeq, cfg: rhrCfg),
             resp: respFold.usable ? respFold : nil,
             skinTemp: skinFold.usable ? skinFold : nil)
@@ -324,22 +331,39 @@ final class IntelligenceEngine: ObservableObject {
 
         // #277 migration: the loop now keys days by the LOCAL calendar day. A prior run (before this
         // fix) wrote the SAME period under UTC-day keys, so without a cleanup an off-by-one UTC row and
-        // the new local row would coexist as duplicate days. Delete the COMPUTED ("-noop") daily rows
-        // across the recompute window [oldest enumerated local day, newest] BEFORE re-upserting, then
-        // re-insert the local-keyed rows. Scoped to the computed source only — imported "my-whoop" rows
-        // are never touched (a BLE-only WHOOP 4.0 user has no import fallback). Rows older than the
-        // window keep their old keys (cosmetic off-by-one, acceptable). yyyy-MM-dd sorts
-        // chronologically, so the string range IS a date range.
+        // the new local row would coexist as duplicate days. We reconcile the COMPUTED ("-noop") daily
+        // rows across the recompute window [oldest enumerated local day, newest]: UPSERT the freshly
+        // local-keyed rows FIRST, then delete only the STALE rows the new run no longer produces.
+        //
+        // #521: the old order was delete-the-whole-window THEN re-upsert — a non-atomic gap where a
+        // concurrent refresh could read `repo.days.count` LOWER (post-delete) then HIGHER (post-upsert),
+        // which the Today inbox mistook for new history and announced as "New data added" on a loop. By
+        // upserting before deleting, the row count is MONOTONIC (it only grows or holds during a
+        // recompute), so recompute churn can never masquerade as growth. Scoped to the computed source
+        // only — imported "my-whoop" rows are never touched (a BLE-only WHOOP 4.0 user has no import
+        // fallback). Rows older than the window keep their old keys (cosmetic off-by-one, acceptable).
+        // yyyy-MM-dd sorts chronologically, so the string range IS a date range.
         let oldestDay = AnalyticsEngine.dayString(nowLocalMidnight - (maxDays - 1) * 86_400,
                                                   offsetSec: tzOffset)
         let newestDay = AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
-        _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: oldestDay, to: newestDay)
 
         // Persist the computed scores under a dedicated "-noop" source so the WHOLE dashboard
         // (Today / Recovery / Strain / Sleep / Trends), not just this screen, reads them. The
         // Repository merges these UNDER any imported "my-whoop" rows, so a real WHOOP import
         // always wins; this only fills the days the strap collected but no import covered.
+        // Upsert FIRST so the row count never transiently dips (#521).
         if !dailies.isEmpty { _ = try? await store.upsertDailyMetrics(dailies, deviceId: computedId) }
+
+        // Now evict only the STALE computed rows in the window — those a prior (e.g. UTC-keyed) run left
+        // behind that the current local-keyed run no longer produces. Read the window, diff against the
+        // keys we just upserted, and delete each leftover day individually (from == to == key). This
+        // removes #277's UTC/local duplicates WITHOUT the wide delete-then-reinsert dip. No-op in steady
+        // state (the new keys cover the window), so it adds nothing once the migration has settled.
+        let freshKeys = Set(dailies.map { $0.day })
+        let existingWindow = (try? await store.dailyMetrics(deviceId: computedId, from: oldestDay, to: newestDay)) ?? []
+        for stale in existingWindow where !freshKeys.contains(stale.day) {
+            _ = try? await store.deleteDailyMetrics(deviceId: computedId, from: stale.day, to: stale.day)
+        }
         if !restPoints.isEmpty { _ = try? await store.upsertMetricSeries(restPoints, deviceId: computedId) }
 
         // ── Fitness Age (Phase 2) — weekly, keyed to the week's Saturday ────────────────────────────
@@ -578,8 +602,16 @@ final class IntelligenceEngine: ObservableObject {
         guard !editsByStart.isEmpty else { return daily }
         let detectedTuples = detected.map { (startTs: $0.startTs, stagesJSON: $0.stagesJSON) }
         let editedStages = editsByStart.mapValues { $0.stagesJSON }
+        // A hand-logged nap is a userEdited row with NO detected twin — it would never be
+        // visited by the substitution pass, so its minutes were dropped from the day's Rest
+        // total. Pass those twinless rows through the union channel so they fold in. (#518/#508)
+        let detectedStarts = Set(detected.map { $0.startTs })
+        let manualTuples = editsByStart
+            .filter { !detectedStarts.contains($0.key) }
+            .map { (startTs: $0.key, stagesJSON: $0.value.stagesJSON) }
         guard let r = SleepStageTotals.dailyAggregateHonoringEdits(detected: detectedTuples,
-                                                                   edited: editedStages),
+                                                                   edited: editedStages,
+                                                                   manual: manualTuples),
               r.editApplied else { return daily }
         let agg = r.sleep
         return daily.with(totalSleepMin: agg.totalSleepMin, efficiency: agg.efficiency,

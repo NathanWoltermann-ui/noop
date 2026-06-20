@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "5.2.6"
+    static let currentVersion = "5.3.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,21 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "5.3.0",
+            title: "Sleep, Charge and workouts, cleaned up",
+            date: "June 2026",
+            items: [
+                "**Your Sleep tab shows your actual night now**, not an afternoon nap that happened to end later. Days with a nap get a clear Main / Nap(s) / Total split so you can see what made up your Rest. (#518)",
+                "**Rest is more honest about deep sleep.** A night with normal REM but barely any deep used to still score in the 90s. It now reflects a low-deep night properly, without inventing stages we can't actually measure.",
+                "**Charge settles in days, not weeks.** Your recovery baseline used to take 2 to 3 weeks to learn, and one high early reading could hold Charge down the whole time. It finds your real baseline fast now. And there's a new **Recalibrate Charge baseline** button under **Settings → Recovery** if you ever want to reset it and re-learn from tonight. Your data isn't deleted.",
+                "**No more \"New data added\" spam.** The Updates inbox used to repeat that every time NOOP re-scored your recent days in the background, even on an old import with nothing new. Now it tells you once, only when a genuinely newer day lands. (#521)",
+                "**A real sport picker on workouts.** Add, edit or start a session and pick from a named list (Padel included), with free text still there for anything that isn't on it. (#519)",
+                "**New: a daily auto-export of your strap log (iPhone & Mac).** Turn it on under **Settings → Diagnostics**, pick a time, and NOOP saves a timestamped copy once a day, so a log is waiting for a bug report without you remembering to grab it. Off by default, stays on your device. On Mac it runs while NOOP is open; on iPhone it fires when iOS next wakes the app near your time, not to the exact minute. Android already had this. (#510)",
+                "**Android: double-tap your strap to do something.** Pick from Nothing, Buzz back, Mark a moment, Log a sleep mark, or Buzz the time, with a Test button. Same as iPhone and Mac now.",
+                "**Android: clearer help when a WHOOP 5/MG won't pair.** Instead of looping silently it now shows the steps to fix it (close the official WHOOP app, hold the band until the lights flash blue, Forget This Device). (#78)",
+                "Plus the home-screen widgets and the iOS Live Activity say Charge instead of Recovery now, workout durations stop clipping on the Today tiles (Android, #332), and updating through AltStore no longer fails partway.",
+            ]),
         Release(
             version: "5.2.6",
             title: "Updates check GitHub again",

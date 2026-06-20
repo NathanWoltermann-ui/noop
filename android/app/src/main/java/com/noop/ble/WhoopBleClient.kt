@@ -40,6 +40,7 @@ import com.noop.protocol.Reassembler
 import com.noop.protocol.Streams
 import com.noop.protocol.Whoop5Config
 import com.noop.protocol.extractStreams
+import com.noop.analytics.Baselines
 import com.noop.analytics.IntelligenceEngine
 import com.noop.analytics.SedentaryDetector
 import com.noop.analytics.StressOnsetDetector
@@ -142,6 +143,12 @@ data class LiveState(
      *  direct connect just re-fails. Carries an actionable forget+re-pair guide; cleared on the next
      *  successful connect. Parity with macOS LiveState.reconnectGuide (5/MG firmware reset, 2026-06). */
     val reconnectGuide: String? = null,
+    /** Set when a WHOOP 5/MG strap keeps REFUSING the encrypted bond on connect (the strap is still
+     *  bonded to the official WHOOP app, so a fresh just-works bond can't start). Carries concrete
+     *  pairing-mode guidance; published once the refusal streak reaches two and cleared on a genuine
+     *  bond or a fresh user-initiated connect. Parity with macOS LiveState.pairingHint (#78). The same
+     *  text is mirrored into [statusNote] so the existing Live status surface shows it with no UI change. */
+    val pairingHint: String? = null,
     /** EXPERIMENTAL R22 telemetry (#174): how many of the 15 enable_r22 SET_CONFIG flags the strap has
      *  ACKed since the last "Send enable sequence" tap. 15 = the strap accepted the whole sequence (it
      *  returns a COMMAND_RESPONSE per flag — hardware-confirmed). Reset per attempt + per session.
@@ -451,6 +458,21 @@ class WhoopBleClient(
          *  race; three in a row on the pin while ANOTHER strap bonds fine is an unrecoverable stale pin.
          *  Mirrors the iOS `pinBondRefusalLimit`. */
         private const val PIN_BOND_REFUSAL_LIMIT = 3
+
+        /** Encrypted-bond refusals before the pairing hint shows (#78). 2 (not 1): a single "insufficient"
+         *  can be a transient just-works race, but two in a row means the strap is genuinely still bonded
+         *  to another app. Mirrors the iOS BLEManager streak>=2 gate. */
+        private const val BOND_REFUSAL_HINT_THRESHOLD = 2
+
+        /** Concrete pairing-mode guidance for a WHOOP 5/MG that keeps refusing the encrypted bond because
+         *  it's still bonded to the official WHOOP app (#78). Plain, country-neutral wording; Android
+         *  settings path. Parity with the macOS pairingHint text. */
+        private const val PAIRING_HINT_TEXT =
+            "Your WHOOP won't pair because it's still bonded to the official WHOOP app. To fix it: " +
+                "1. Close the official WHOOP app (or turn off Bluetooth on that phone). " +
+                "2. Hold or tap the band until its LEDs flash blue (pairing mode). " +
+                "3. Open Settings > Bluetooth, find your WHOOP, and choose Forget This Device. " +
+                "Then come back and tap Connect."
 
         /** 5/MG raw-capture file (app filesDir; shared via Settings → "Share 5/MG capture"). */
         const val WHOOP5_CAPTURE_FILE = "whoop5-backfill-capture.jsonl"
@@ -959,6 +981,12 @@ class WhoopBleClient(
                             profileStore.stepsCalibrationConfidence = cal.confidence
                             profileStore.stepsCalibrationManual = cal.manual
                         },
+                        // Manual "Recalibrate baseline" anchor (noop.hrvBaselineEpoch, whole seconds in a
+                        // Long). The analytics layer is Context-free, so read it here and thread it down so
+                        // the post-backfill scoring pass honours the recalibration too — not just the UI's
+                        // 15-min loop. 0 = no recalibration.
+                        baselineEpoch = NoopPrefs.of(context)
+                            .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
                     )
                 }.onSuccess {
                     log("Backfill: post-sync scoring pass done")
@@ -1886,6 +1914,13 @@ class WhoopBleClient(
         failedReconnectAttempts = 0
     }
 
+    /** Clear the pairing-hint streak + any published hint for a FRESH user-initiated Connect (#78). Kept
+     *  off the involuntary-reconnect path on purpose: the streak must SURVIVE automatic reconnects (like
+     *  the #52 pinnedBondRefusals counter) so it can accumulate to the threshold across the strap dropping
+     *  and re-bonding. Only an explicit user tap (AppViewModel.connect) starts it over. Public so the
+     *  ViewModel can call it; a thin wrapper over the private [clearPairingHint]. */
+    fun clearPairingHintForUserConnect() = clearPairingHint()
+
     /** Bonded-handshake watchdog (#50): every other connect phase has a timeout (scan; MTU fallback;
      *  keep-alive) but the post-discovery bond/CCCD handshake had none — so a WHOOP 4.0 that wedges
      *  in "finishing secure handshake" (OnePlus Nord 2, #50) never bounced, and keep-alive recovery
@@ -1939,6 +1974,15 @@ class WhoopBleClient(
      *  rationale as above. */
     @Volatile
     private var pinnedBondRefusals = 0
+
+    /** Consecutive WHOOP 5/MG encrypted-bond refusals this session, with NO genuine bond reached yet.
+     *  Distinct from [pinnedBondRefusals] (which is about a stale multi-WHOOP registry pin): this one
+     *  drives the user-facing pairing hint (#78). A 5/MG that's still bonded to the official WHOOP app
+     *  keeps refusing the just-works bond, so after two refusals we surface concrete pairing-mode
+     *  guidance. Reset to 0 on a genuine bond and on a fresh user-initiated connect. @Volatile — written
+     *  from the GATT bond callback (binder-pool thread on API 26/27). */
+    @Volatile
+    private var bondRefusalStreak = 0
 
     /** A genuine bond this run: [address] is a live working strap (re-adopt target), and a bond proves no
      *  stale pin is wedging us — so clear the refusal streak. Twin of iOS `noteGenuineBond`. */
@@ -1998,6 +2042,38 @@ class WhoopBleClient(
      *  is insufficient" error string the iOS #52 path keys on. */
     private fun isInsufficientAuthStatus(status: Int): Boolean =
         status == GATT_INSUFFICIENT_AUTHENTICATION || status == GATT_INSUFFICIENT_ENCRYPTION
+
+    /** Count a WHOOP 5/MG encrypted-bond refusal toward the pairing-hint streak (#78) and, once it
+     *  reaches [BOND_REFUSAL_HINT_THRESHOLD] with no genuine bond yet this session, publish concrete
+     *  pairing-mode guidance. WHOOP 4 always reaches a genuine bond, so this is 5/MG-only (matching the
+     *  iOS BLEManager, which only sets pairingHint on the puffin link). Independent of the multi-WHOOP
+     *  pin recovery in [noteBondRefusalIfPinned], which is left untouched. The guidance is mirrored into
+     *  [statusNote] (already rendered on the Live screen) so it surfaces with no UI-layer change. */
+    private fun noteBondRefusalForPairingHint(status: Int) {
+        if (!isInsufficientAuthStatus(status)) return
+        if (didBond) return                                       // already bonded — not a pairing problem
+        if (connectedFamily != DeviceFamily.WHOOP5) return        // WHOOP 4 bonds cleanly; hint is 5/MG-only
+        bondRefusalStreak++
+        if (bondRefusalStreak >= BOND_REFUSAL_HINT_THRESHOLD) {
+            // Re-assert BOTH the canonical hint and the statusNote mirror on every over-threshold refusal.
+            // STATE_CONNECTED clears statusNote on each reconnect, so a once-only set would leave the Live
+            // status blank after a reconnect — re-asserting keeps the already-rendered surface in sync.
+            if (_state.value.pairingHint == null) {
+                log("WHOOP 5/MG: encrypted bond refused $bondRefusalStreak times — surfacing pairing guidance (#78)")
+            }
+            _state.value = _state.value.copy(pairingHint = PAIRING_HINT_TEXT, statusNote = PAIRING_HINT_TEXT)
+        }
+    }
+
+    /** Clear the pairing-hint streak + published hint after a genuine bond or a fresh connect. Also clears
+     *  the mirrored [statusNote] only when it still carries the hint, so we never wipe an unrelated note. */
+    private fun clearPairingHint() {
+        bondRefusalStreak = 0
+        if (_state.value.pairingHint != null) {
+            val clearedNote = if (_state.value.statusNote == PAIRING_HINT_TEXT) null else _state.value.statusNote
+            _state.value = _state.value.copy(pairingHint = null, statusNote = clearedNote)
+        }
+    }
 
     /** Guards the once-per-connect service-discovery kick. Discovery is deferred behind an MTU request
      *  (and a fallback timeout), so this ensures it fires EXACTLY once whichever path wins. AtomicBoolean
@@ -2234,6 +2310,10 @@ class WhoopBleClient(
                 // Count consecutive refusals on the PINNED strap; after the limit, hand the pin to the
                 // live-bonding strap so the registry re-adopts it. (Reimplemented under NoopApp, #52.)
                 noteBondRefusalIfPinned(g.device.address, status)
+                // Separately (#78): count the refusal toward the user-facing pairing hint. A 5/MG still
+                // bonded to the official WHOOP app keeps refusing the just-works bond; after two refusals
+                // we surface concrete pairing-mode guidance. Independent of the pin recovery above.
+                noteBondRefusalForPairingHint(status)
             } else if (!didBond && connectedFamily == DeviceFamily.WHOOP5) {
                 // EXPERIMENTAL (issue #17): the CLIENT_HELLO is now a confirmed write, so this ACK means
                 // just-works bonding completed. Now subscribe the puffin notify chars (realtime HR rides
@@ -2242,6 +2322,7 @@ class WhoopBleClient(
                 didBond = true
                 cancelBondWatchdog()          // genuine bond reached — the handshake watchdog stands down (#50)
                 noteGenuineBond(g.device.address)   // #52: this strap bonds fine; clears any pin-refusal streak
+                clearPairingHint()            // #78: a genuine bond means the pairing guidance no longer applies
                 bondedDirectAttempt = false   // fast-path connect reached a real session (#78 fork)
                 staleDirectFailures = 0       // genuine bond — clear the wiped-bond counter (#84 parity)
                 _state.value = _state.value.copy(bonded = true, encryptedBond = true)   // genuine bond (#69)
@@ -2261,6 +2342,7 @@ class WhoopBleClient(
                 didBond = true
                 cancelBondWatchdog()          // secure handshake completed — stand the watchdog down (#50)
                 noteGenuineBond(g.device.address)   // #52: this strap bonds fine; clears any pin-refusal streak
+                clearPairingHint()            // #78: a genuine bond means the pairing guidance no longer applies
                 _state.value = _state.value.copy(bonded = true, encryptedBond = true)   // WHOOP4 bond is genuine (#69)
                 log("BONDED (confirmed write acknowledged) — custom channels should now flow")
             }
@@ -2593,7 +2675,9 @@ class WhoopBleClient(
                             _state.value = _state.value.copy(lastEvent = ev)
                             when {
                                 ev.startsWith("DOUBLE_TAP") -> {
-                                    // Surfaced via lastEvent; the ViewModel maps it to the user's chosen action.
+                                    // Surfaced via lastEvent only — the decode is unchanged. AppViewModel's
+                                    // LiveState collector (dispatchDoubleTap) debounces on the event identity
+                                    // and runs the user's chosen DoubleTapAction (parity since 4.2.8).
                                 }
                                 ev.startsWith("WRIST_ON") -> {
                                     if (!_state.value.worn) _state.value = _state.value.copy(worn = true)

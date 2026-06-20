@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Science
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -52,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +75,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
+import com.noop.analytics.Baselines
 import com.noop.analytics.Zones
 import com.noop.ble.PuffinExperiment
 import com.noop.ble.WhoopModel
@@ -284,6 +288,11 @@ fun SettingsScreen(vm: AppViewModel) {
 
     // "How your scores work" explainer sheet, reachable any time from About (macOS/iOS parity).
     var showScoringGuide by remember { mutableStateOf(false) }
+
+    // "Recalibrate HRV baseline" confirm dialog (Charge advanced). Writes the noop.hrvBaselineEpoch
+    // pref = now-seconds so foldHistory re-seeds the Charge baseline from tonight onward; the standing
+    // analyze loop picks it up on its next pass. Fixes a baseline that anchored too high on early nights.
+    var showRecalibrateConfirm by remember { mutableStateOf(false) }
 
     // Steps-estimate calibration screen (WHOOP 4.0), reached from the Profile card's "Steps estimate"
     // tap-through. Mirrors the macOS StepsCalibrationSheet: honest explainer + current fit + a recent
@@ -1463,6 +1472,81 @@ fun SettingsScreen(vm: AppViewModel) {
                     },
                 )
             }
+        }
+
+        // --- Charge (Recovery) advanced ---
+        // A manual reset for the personal Charge HRV baseline. If your first few nights read high
+        // (a common cold-start artefact), the baseline can anchor too high and hold your Charge low
+        // for a couple of weeks while the rolling average catches up. Recalibrate re-learns it from
+        // tonight onward. Writes noop.hrvBaselineEpoch = now-seconds; foldHistory drops every night
+        // before that epoch and re-seeds. Mirrors the iOS/Mac Settings recalibrate button.
+        SettingsSection(
+            icon = Icons.Filled.Favorite,
+            title = "Charge",
+            blurb = "Charge is NOOP's daily readiness score, learned from your own HRV and resting heart rate over time.",
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Recalibrate Charge baseline", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        "Re-learns your Charge baseline from tonight onward — use if an early reading anchored it too high.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { showRecalibrateConfirm = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Recalibrate Charge baseline" },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.accent),
+                ) { Text("Recalibrate Charge baseline", style = NoopType.captionNumber) }
+            }
+        }
+
+        if (showRecalibrateConfirm) {
+            AlertDialog(
+                onDismissRequest = { showRecalibrateConfirm = false },
+                containerColor = Palette.surfaceOverlay,
+                title = { Text("Recalibrate your Charge baseline?", style = NoopType.title2, color = Palette.textPrimary) },
+                text = {
+                    Text(
+                        "NOOP will re-learn your Charge baseline from tonight onward. Earlier nights are ignored, so a baseline that anchored too high resets. Your history isn't deleted — only how the baseline is calculated changes. It takes a few nights to settle.",
+                        style = NoopType.subhead,
+                        color = Palette.textSecondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            // Write now-seconds to the shared epoch key (EXACT same key the iOS/Mac
+                            // button + Baselines.foldHistory use). Stored as whole epoch SECONDS in a
+                            // Long (SharedPreferences has no putDouble; the reader does getLong→toDouble),
+                            // matching the "epoch SECONDS" the key documents. Inline edit() like the
+                            // Rhythm toggle above — this screen doesn't own a ViewModel setter for it.
+                            val nowSeconds = System.currentTimeMillis() / 1000L
+                            NoopPrefs.of(context).edit()
+                                .putLong(Baselines.hrvBaselineEpochKey, nowSeconds)
+                                .apply()
+                            showRecalibrateConfirm = false
+                            // Nudge an immediate re-analyze so the change is felt now; the standing
+                            // 15-min analyze loop also re-runs foldHistory regardless. No-ops cleanly
+                            // when the strap isn't connected.
+                            vm.syncNow()
+                            Toast.makeText(
+                                context,
+                                "Charge baseline reset. NOOP will re-learn it from tonight — it takes a few nights to settle.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        },
+                    ) { Text("Recalibrate", style = NoopType.body, color = Palette.accent) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRecalibrateConfirm = false }) {
+                        Text("Cancel", style = NoopType.body, color = Palette.textSecondary)
+                    }
+                },
+            )
         }
 
         SettingsSection(

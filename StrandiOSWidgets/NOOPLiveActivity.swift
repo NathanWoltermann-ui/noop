@@ -22,7 +22,7 @@ struct NOOPLiveActivity: Widget {
                 Spacer()
                 if let r = context.state.recovery {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("Recovery").font(.caption2).foregroundStyle(StrandPalette.textSecondary)
+                        Text("Charge").font(.caption2).foregroundStyle(StrandPalette.textSecondary)
                         Text("\(r)%").font(.headline).foregroundStyle(StrandPalette.textPrimary)
                     }
                 }

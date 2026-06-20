@@ -250,7 +250,8 @@ public enum AnalyticsEngine {
             efficiency: efficiency,
             restorativeSeconds: deepS + remS,
             needHours: sleepNeedHours,
-            consistency: sleepConsistency)
+            consistency: sleepConsistency,
+            deepSeconds: deepS)
 
         // Daily resting HR = lowest per-session resting HR across matched sessions.
         let restingHRDaily = matched.compactMap { $0.restingHR }.min()
@@ -439,11 +440,26 @@ public enum AnalyticsEngine {
     ///     regularity signal, so the caller supplies it from history — nil → neutral 0.5.
     /// All sub-scores clamp to [0,1]; the weighted sum scales to [0,100]. Kept
     /// dependency-free + constant-explicit so the Kotlin mirror is byte-identical.
+    ///
+    /// DEEP-sleep honesty (Reddit HRV/sleep report): pooling deep+REM let a night with normal REM
+    /// but almost no DEEP still earn near-full restorative credit (so Rest read 95+ with little deep).
+    /// When the caller supplies the DEEP split (`deepSeconds`), the restorative sub-score is scaled by
+    /// a gentle deep-adequacy factor: full credit once deep ≥ `deepShareTarget` (~13% of asleep is the
+    /// healthy floor), ramping to `deepFloorFactor` (0.5 — never zeroed) as deep → 0. So a near-zero-deep
+    /// night loses up to half the 0.20 restorative term (~10 pts) — honest, not tanking, no fabricated
+    /// stages. Deep unknown (`deepSeconds == nil`, e.g. an imported night with only a pooled total) →
+    /// factor 1.0, identical to the prior pooled behaviour.
     public enum Rest {
         /// Default personal sleep need (hours) before the caller refines it.
         public static let defaultNeedHours: Double = 8.0
         /// "Full marks" restorative (deep+REM) share of asleep time.
         public static let restorativeTarget: Double = 0.50
+        /// Deep-sleep share of asleep time that earns FULL restorative credit (~13% is the healthy
+        /// floor for adults; below it the restorative term is scaled down toward `deepFloorFactor`).
+        public static let deepShareTarget: Double = 0.13
+        /// The most the restorative term is scaled down by when deep is ~absent — half, never zero,
+        /// so a low-deep night reads honestly without the whole night tanking.
+        public static let deepFloorFactor: Double = 0.5
         /// Neutral consistency when the caller supplies no regularity signal.
         public static let neutralConsistency: Double = 0.5
 
@@ -452,21 +468,30 @@ public enum AnalyticsEngine {
         public static let wRestorative: Double = 0.20
         public static let wConsistency: Double = 0.10
 
-        /// Build the composite. `tstSeconds` = total sleep time, `restorativeSeconds` =
-        /// deep+REM seconds. Returns a value in [0,100].
+        /// Build the composite. `tstSeconds` = total sleep time, `restorativeSeconds` = deep+REM
+        /// seconds, `deepSeconds` = deep-stage seconds (nil → no deep-adequacy adjustment, pooled
+        /// behaviour). Returns a value in [0,100].
         public static func composite(tstSeconds: Double,
                                      inBedSeconds: Double,
                                      efficiency: Double,
                                      restorativeSeconds: Double,
                                      needHours: Double,
-                                     consistency: Double?) -> Double {
+                                     consistency: Double?,
+                                     deepSeconds: Double? = nil) -> Double {
             func clamp01(_ x: Double) -> Double { max(0.0, min(1.0, x)) }
 
             let needSeconds = max(needHours, 0.1) * 3600.0
             let durationScore = clamp01(tstSeconds / needSeconds)
             let efficiencyScore = clamp01(efficiency)
+            // Deep-adequacy factor in [deepFloorFactor, 1]: 1.0 once deep ≥ target share, ramping
+            // down to the floor as deep → 0. nil deep (unknown split) ⇒ 1.0 (no adjustment).
+            let deepFactor: Double = {
+                guard let deep = deepSeconds, tstSeconds > 0, deepShareTarget > 0 else { return 1.0 }
+                let adequacy = clamp01((deep / tstSeconds) / deepShareTarget)
+                return deepFloorFactor + (1.0 - deepFloorFactor) * adequacy
+            }()
             let restorativeScore = tstSeconds > 0
-                ? clamp01((restorativeSeconds / tstSeconds) / restorativeTarget)
+                ? clamp01((restorativeSeconds / tstSeconds) / restorativeTarget) * deepFactor
                 : 0.0
             let consistencyScore = clamp01(consistency ?? neutralConsistency)
 
@@ -486,10 +511,12 @@ public enum AnalyticsEngine {
                                      consistency: Double? = nil) -> Double? {
             guard let tstMin = d.totalSleepMin, tstMin > 0, let eff = d.efficiency else { return nil }
             let tstSec = tstMin * 60.0
-            let restorativeSec = ((d.deepMin ?? 0) + (d.remMin ?? 0)) * 60.0
+            let deepSec = (d.deepMin ?? 0) * 60.0
+            let restorativeSec = (d.deepMin ?? 0) * 60.0 + (d.remMin ?? 0) * 60.0
             return composite(tstSeconds: tstSec, inBedSeconds: tstSec / max(eff, 0.01),
                              efficiency: eff, restorativeSeconds: restorativeSec,
-                             needHours: needHours, consistency: consistency)
+                             needHours: needHours, consistency: consistency,
+                             deepSeconds: deepSec)
         }
     }
 

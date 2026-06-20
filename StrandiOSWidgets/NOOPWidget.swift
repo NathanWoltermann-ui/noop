@@ -53,7 +53,7 @@ struct NOOPWidgetView: View {
 
     private var inlineText: String {
         var parts: [String] = []
-        if let r = snap.recovery { parts.append("Recovery \(r)%") }
+        if let r = snap.recovery { parts.append("Charge \(r)%") }
         if let b = snap.bpm { parts.append("\(b) bpm") }
         return parts.isEmpty ? "NOOP" : parts.joined(separator: " · ")
     }
@@ -72,7 +72,7 @@ struct NOOPWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Image(systemName: "heart.fill").foregroundStyle(recoveryColor)
-                Text("Recovery \(snap.recovery.map(String.init) ?? "–")%").font(.headline)
+                Text("Charge \(snap.recovery.map(String.init) ?? "–")%").font(.headline)
             }
             Text("\(snap.bpm.map(String.init) ?? "–") bpm · \(snap.batteryPct.map { "\($0)%" } ?? "–")")
                 .font(.caption)
@@ -97,7 +97,7 @@ struct NOOPWidgetView: View {
                     .foregroundStyle(recoveryColor)
                 Text("%").font(.headline).foregroundStyle(StrandPalette.textTertiary)
             }
-            Text("Recovery").font(.caption).foregroundStyle(StrandPalette.textTertiary)
+            Text("Charge").font(.caption).foregroundStyle(StrandPalette.textTertiary)
             Spacer(minLength: 0)
             HStack {
                 Label("\(snap.bpm.map(String.init) ?? "–")", systemImage: "waveform.path.ecg")
@@ -124,8 +124,8 @@ struct NOOPWidget: Widget {
                     .background(StrandPalette.surfaceBase)
             }
         }
-        .configurationDisplayName("NOOP Recovery")
-        .description("Recovery, live heart rate, and strap battery at a glance.")
+        .configurationDisplayName("NOOP Charge")
+        .description("Charge, live heart rate, and strap battery at a glance.")
         .supportedFamilies([
             .systemSmall, .systemMedium,
             .accessoryCircular, .accessoryInline, .accessoryRectangular

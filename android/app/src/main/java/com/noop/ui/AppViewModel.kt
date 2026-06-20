@@ -8,6 +8,7 @@ import com.noop.alarm.SmartAlarmScheduler
 import com.noop.alarm.SmartAlarmStore
 import com.noop.alarm.WindDownScheduler
 import com.noop.alarm.WindDownStore
+import com.noop.analytics.Baselines
 import com.noop.analytics.HrZones
 import com.noop.analytics.IllnessSignalEngine
 import com.noop.analytics.IllnessWatch
@@ -15,6 +16,8 @@ import com.noop.analytics.IntelligenceEngine
 import com.noop.analytics.V5HealthSignals
 import com.noop.analytics.RegistryDayOwnerSource
 import com.noop.analytics.RouteMath
+import com.noop.analytics.SleepMark
+import com.noop.analytics.SleepMarkType
 import com.noop.analytics.Sport
 import com.noop.analytics.Calories
 import com.noop.analytics.StrainScorer
@@ -263,6 +266,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Last HR zone the coach saw (1..5, 0 = below Zone 1); -1 until the first sample. Mirrors macOS lastCoachZone. */
     private var lastZone = -1
 
+    // Double-tap action (parity since 4.2.8) — persisted in SharedPreferences (NoopPrefs). Default NONE,
+    // manual-first. The Automations screen edits this; the live double-tap dispatch (init collector below)
+    // reads it. Port of macOS BehaviorStore.doubleTapAction + AppModel.runMacAction (the Apple-applicable
+    // subset only — no lockScreen / runShortcut on Android).
+    private val _doubleTapAction =
+        MutableStateFlow(DoubleTapAction.fromRaw(NoopPrefs.of(appContext).getString(DOUBLE_TAP_ACTION_KEY, null)))
+    /** What a strap double-tap triggers. */
+    val doubleTapAction: StateFlow<DoubleTapAction> = _doubleTapAction.asStateFlow()
+
+    /** Last strap [LiveState.lastEvent] the double-tap dispatch acted on, so a single physical tap fires
+     *  exactly once: a DOUBLE_TAP event lingers in lastEvent (it's the most-recent event) and the
+     *  collector re-runs on every LiveState emission, so we only dispatch on a FRESH transition into a
+     *  DOUBLE_TAP event. Mirrors the iOS AppModel debounce (lastDoubleTapAt). Seeded with whatever event
+     *  is already current so a ViewModel recreated right after a double-tap (e.g. a screen rotation, the
+     *  process-owned BLE client keeps the old lastEvent) treats it as already-handled, not a fresh tap. */
+    private var lastDispatchedEvent: String? = ble.state.value.lastEvent
+
     // PHONE smart alarm (#207) — distinct from the strap-firmware buzz alarm above. The state lives in
     // its own [SmartAlarmStore]; the GUARANTEED wake is an exact OS alarm via [SmartAlarmScheduler],
     // independent of Bluetooth, sleep detection, or this process being alive. The overnight watcher
@@ -322,6 +342,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 // still flowing keeps the median (matches AppModel.ingestHR's disconnect guard).
                 if (state.heartRate == null && state.rr.isEmpty()) resetSmoothing()
                 coachZone(state)
+                dispatchDoubleTap(state)
                 if (state.bonded && !lastBonded) {
                     if (_smartAlarmEnabled.value) applySmartAlarm()
                     // Remember this strap so we can reconnect to it directly on the next launch (#67),
@@ -460,6 +481,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             profileStore.stepsCalibrationConfidence = cal.confidence
                             profileStore.stepsCalibrationManual = cal.manual
                         },
+                        // Manual "Recalibrate baseline" anchor (Settings → Charge advanced). The analytics
+                        // layer is Context-free, so read the epoch (whole seconds, written as a Long by the
+                        // button) here and thread it down — foldHistory drops every HRV night before it.
+                        baselineEpoch = NoopPrefs.of(appContext)
+                            .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
                     )
                     // analyzeRecent now hops to Dispatchers.Default; a scope cancellation surfaces as a
                     // CancellationException that runCatching would otherwise swallow, breaking the loop's
@@ -812,6 +838,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // An explicit user-driven Connect must start the reconnect schedule fresh — never inherit a
         // backoff delay accumulated by a prior involuntary-reconnect loop (#48, iOS connect() parity).
         ble.resetReconnectBackoff()
+        // A fresh user Connect also clears any lingering pairing-mode guidance + its refusal streak (#78),
+        // so a hint from a previous attempt doesn't carry into the retry the user just kicked off. (Auto
+        // reconnects deliberately don't, so the streak can accumulate to the threshold across drops.)
+        ble.clearPairingHintForUserConnect()
         ble.connect(_selectedModel.value)
         // Keep the link alive when the app is closed, unless the user has opted out. Started from the
         // foreground (this is a user tap), so Android 12+'s background-start rule is satisfied.
@@ -1143,6 +1173,85 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Fire a haptic buzz on the strap (requires a bonded connection). */
     fun buzz(loops: Int = 2) = ble.buzz(loops)
 
+    // --- Double-tap action (parity since 4.2.8). Persisted via NoopPrefs; dispatched from the init
+    // LiveState collector on a fresh DOUBLE_TAP event. Port of macOS BehaviorStore.doubleTapAction +
+    // AppModel.handleDoubleTap / runMacAction (Apple-applicable subset only). ---
+
+    /** Set the double-tap action (driven by the Automations screen) and persist it. */
+    fun setDoubleTapAction(action: DoubleTapAction) {
+        _doubleTapAction.value = action
+        NoopPrefs.of(appContext).edit().putString(DOUBLE_TAP_ACTION_KEY, action.name).apply()
+    }
+
+    /** Run the configured double-tap action NOW (the Automations "Test action" button). Mirrors the iOS
+     *  AutomationsView "Test action" calling model.runMacAction directly. */
+    fun testDoubleTapAction() = runDoubleTapAction(_doubleTapAction.value)
+
+    /**
+     * Dispatch the double-tap action when the strap reports a FRESH double-tap. The BLE client already
+     * surfaces the gesture as [LiveState.lastEvent] = "DOUBLE_TAP(14)" (WhoopBleClient onInbound) — it
+     * does NOT change the decode; this just consumes the event it already publishes. Debounced on the
+     * event identity: [lastEvent] keeps its last value across many LiveState emissions, so without the
+     * [lastDispatchedEvent] guard a single tap would fire on every subsequent emission. Mirrors the iOS
+     * AppModel.handleDoubleTap (which debounces on a 1.2s window over the same onDoubleTap closure).
+     */
+    private fun dispatchDoubleTap(state: LiveState) {
+        val ev = state.lastEvent
+        if (ev == lastDispatchedEvent) return       // not a fresh event since we last looked
+        lastDispatchedEvent = ev
+        if (ev == null || !ev.startsWith("DOUBLE_TAP")) return
+        val action = _doubleTapAction.value
+        if (action == DoubleTapAction.NONE) return
+        ble.externalLog("Double-tap -> ${action.label}")
+        runDoubleTapAction(action)
+    }
+
+    /** Execute one double-tap action using the primitives that already exist on Android. In-app side
+     *  effects (buzz / log / sleep mark) stay on-device; there is no lockScreen / Shortcuts action on
+     *  Android (those Apple-only cases were dropped from [DoubleTapAction]). */
+    private fun runDoubleTapAction(action: DoubleTapAction) {
+        when (action) {
+            DoubleTapAction.NONE -> {}
+            DoubleTapAction.BUZZ_BACK -> ble.buzz(1)
+            DoubleTapAction.MARK_MOMENT -> markMoment()
+            DoubleTapAction.SLEEP_MARK -> markSleep()
+            DoubleTapAction.HAPTIC_CLOCK -> ble.buzzTimeNow(is24h = localeUses24HourClock())
+        }
+    }
+
+    /** Record a "moment" (a double-tap marker) with a confirming buzz. Android has no separate moments
+     *  store yet, so — matching the iOS markMoment's user-visible effect (a buzz + a greppable log line)
+     *  — this writes a timestamped line into the shareable strap log and buzzes once. Additive: no new
+     *  persistence, no change to any existing path. */
+    private fun markMoment() {
+        val clock = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date())
+        ble.externalLog("Moment marked @ $clock")
+        ble.buzz(1)
+    }
+
+    /** Record a "sleep mark" via the existing [SleepMark] analytics + the shareable strap log, with a
+     *  confirming buzz — the same logging-only path the Sleep screen's mark card uses (#461). A double-tap
+     *  can't pick bedtime vs wake, so it defaults to bedtime ([SleepMark.nowDefault]). */
+    private fun markSleep() {
+        val mark = SleepMark.nowDefault()
+        ble.externalLog(mark.logLine())
+        ble.buzz(1)
+        viewModelScope.launch {
+            // Use the SAME "my-whoop" series source the Sleep screen's mark card writes (SleepScreen.kt)
+            // and reads back from, so a double-tap mark lands in the same place a tapped one does.
+            runCatching { repository.upsertMetricSeries(listOf(mark.metricPoint("my-whoop"))) }
+        }
+    }
+
+    /** Whether the device's locale formats time on a 24-hour clock — drives the Haptic Clock's hour
+     *  encoding so a double-tap buzzes the time the way the user reads it. Mirrors macOS
+     *  AppModel.localeUses24HourClock. */
+    private fun localeUses24HourClock(): Boolean {
+        val pattern = (java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT) as? java.text.SimpleDateFormat)
+            ?.toPattern() ?: "h:mm a"
+        return !pattern.contains('a', ignoreCase = true)
+    }
+
     // --- HR-zone haptic coaching setters + behaviour. State (_zoneCoaching/_zoneCoachRecovery/lastZone)
     // is declared ABOVE the init block (see the note there) so the synchronous first emission is safe. ---
 
@@ -1192,6 +1301,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         const val ANALYZE_INTERVAL_MS = 15 * 60 * 1_000L
         /** Daily re-arm cadence for the single-instant strap firmware alarm (secondary buzz cue). */
         const val STRAP_ALARM_REARM_INTERVAL_MS = 24 * 60 * 60 * 1_000L
+        /** SharedPreferences key for the persisted double-tap action (stored as the enum NAME). */
+        const val DOUBLE_TAP_ACTION_KEY = "noop.doubleTapAction"
+    }
+}
+
+/**
+ * What a strap double-tap does on Android (parity promised since 4.2.8). Mirrors the Apple-applicable
+ * subset of iOS `MacActionKind` (Strand/System/MacActions.swift): the macOS-only `lockScreen` and the
+ * Shortcuts-only `runShortcut` cases are deliberately DROPPED — Android has neither. Persisted by raw
+ * value (the enum NAME) in NoopPrefs; default [NONE] keeps it manual-first. The dispatch lives in
+ * [AppViewModel] (the Android analogue of iOS AppModel.runMacAction).
+ */
+enum class DoubleTapAction {
+    NONE,         // do nothing (default — manual-first)
+    BUZZ_BACK,    // a single confirming buzz
+    MARK_MOMENT,  // log a timestamped "moment" to the strap log
+    SLEEP_MARK,   // log a sleep mark (#461)
+    HAPTIC_CLOCK; // buzz the current time out on the strap (#460)
+
+    /** The picker label, mirroring the iOS `MacActionKind.label` wording for the same cases. */
+    val label: String
+        get() = when (this) {
+            NONE -> "Nothing"
+            BUZZ_BACK -> "Buzz back (confirm)"
+            MARK_MOMENT -> "Mark a moment"
+            SLEEP_MARK -> "Log a sleep mark"
+            HAPTIC_CLOCK -> "Buzz the time"
+        }
+
+    companion object {
+        /** Decode a persisted name back to an action; tolerant of an unknown/blank value (→ [NONE]). */
+        fun fromRaw(raw: String?): DoubleTapAction =
+            entries.firstOrNull { it.name == raw } ?: NONE
     }
 }
 

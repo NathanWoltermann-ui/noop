@@ -37,6 +37,18 @@ object ExerciseTypes {
         EX.EXERCISE_TYPE_OTHER_WORKOUT to "Other",
     )
 
+    /**
+     * Sports the user can pick that Health Connect has NO dedicated type for, so they ride on a
+     * fallback HC type (here "Other") while keeping their own NOOP label. Kept OUT of [NAMES] because
+     * that map is int-keyed — "Padel" and "Other" would collide on EXERCISE_TYPE_OTHER_WORKOUT — and
+     * because an inbound HC record of that type must still read back as the generic name, not Padel.
+     * Padel (#77 / #152): a racquet sport HC doesn't enumerate yet → writes as "Other", stays "Padel"
+     * on our own rows. List the display name + the HC type it falls back to.
+     */
+    val EXTRA: List<Pair<String, Int>> = listOf(
+        "Padel" to EX.EXERCISE_TYPE_OTHER_WORKOUT,
+    )
+
     /** Types where a route makes sense -> GPS defaults on. */
     val DISTANCE_TYPES: Set<Int> = setOf(
         EX.EXERCISE_TYPE_RUNNING,

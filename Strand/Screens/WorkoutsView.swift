@@ -24,6 +24,7 @@ struct WorkoutsView: View {
     /// header/empty-state can start a live session and present the in-exercise view directly.
     @EnvironmentObject var model: AppModel
     @State private var showLiveWorkout = false
+    @State private var showStartSport = false
 
     // Imperial/Metric display preference (D#103). Workout distances are stored in metres; the toggle
     // re-labels them to miles/yards. Display-only — nothing on disk changes.
@@ -161,6 +162,14 @@ struct WorkoutsView: View {
         .sheet(isPresented: $showLiveWorkout) {
             LiveWorkoutView(onClose: { showLiveWorkout = false })
         }
+        // #519: name the sport before a live session starts, then open the in-exercise view directly
+        // (same direct present as the button's already-active path — no cross-view auto-present race).
+        .sheet(isPresented: $showStartSport) {
+            StartWorkoutSheet { name in
+                model.startWorkout(sport: name)
+                showLiveWorkout = true
+            }
+        }
     }
 
     /// Present the read-only detail for a tapped row. The primary affordance; the ••• menu stays the
@@ -294,8 +303,10 @@ struct WorkoutsView: View {
     /// presents the in-exercise view directly (no cross-view auto-present race with LiveView's sheet).
     private var startLiveWorkoutButton: some View {
         Button {
-            if model.activeWorkout == nil { model.startWorkout() }
-            showLiveWorkout = true
+            // No active session → pick a named sport first (#519), then the sheet's onStart begins it
+            // and opens the in-exercise view. Already active → jump straight back into the live view.
+            if model.activeWorkout == nil { showStartSport = true }
+            else { showLiveWorkout = true }
         } label: {
             Label(model.activeWorkout == nil ? "Start Workout" : "View active workout",
                   systemImage: model.activeWorkout == nil ? "figure.run" : "timer")

@@ -244,28 +244,32 @@ fun TodayScreen(
         }
     }
 
-    // The day-count seen on the previous observation, so a refresh/import that brings in NEW days can
-    // post ONE honest `.reading` update ("N new days of history landed", deep-linking to Trends). Null
-    // until the first observation establishes a baseline, so the very first load never posts — we only
-    // announce genuine growth. The count comes straight from the merged history (no fabricated numbers).
-    var lastSeenDayCount by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(days.size, updateStore) {
+    // Announce NEW history to the inbox only when the NEWEST day-key (max yyyy-MM-dd) moves strictly
+    // forward — not on a count change (#521). A background recompute rebuilds the window via
+    // delete-then-reinsert, so the count momentarily dips and recovers while the newest key is unchanged
+    // — keying off the count mistook that churn for new history and re-posted "New data added" on a
+    // loop. The baseline is PERSISTED in SharedPreferences (not `remember`), so a relaunch over the same
+    // history never re-announces. Empty baseline = first sight → record silently, never announce
+    // historical data. The "added" count is the distinct days strictly above the old watermark — real,
+    // never fabricated. Deep-links to Trends. Mirrors the Swift `announceNewDaysIfNeeded`.
+    LaunchedEffect(days, updateStore) {
         val store = updateStore ?: return@LaunchedEffect
-        val now = days.size
-        val previous = lastSeenDayCount
-        lastSeenDayCount = now
-        if (previous != null && now > previous) {
-            val added = now - previous
-            val daysWord = if (added == 1) "day" else "days"
-            store.post(
-                UpdateItem(
-                    kind = UpdateKind.READING,
-                    title = "New data landed",
-                    message = "$added new $daysWord of history is ready in Trends.",
-                    deepLink = "trends",
-                ),
-            )
-        }
+        val newestKey = days.maxOfOrNull { it.day } ?: return@LaunchedEffect   // no history yet
+        val previousKey = NewDataWatermark.lastAnnouncedKey(context)
+        NewDataWatermark.setLastAnnouncedKey(context, newestKey)
+        if (previousKey.isEmpty()) return@LaunchedEffect            // first sight → silent baseline
+        if (newestKey <= previousKey) return@LaunchedEffect         // recompute churn, not new history
+        val added = days.map { it.day }.toSet().count { it > previousKey }
+        if (added <= 0) return@LaunchedEffect
+        val daysWord = if (added == 1) "day" else "days"
+        store.post(
+            UpdateItem(
+                kind = UpdateKind.READING,
+                title = "New data added",
+                message = "$added new $daysWord of history is ready in Trends.",
+                deepLink = "trends",
+            ),
+        )
     }
 
     // The newest Apple Health / Health Connect body weight, loaded off the main thread. Null until the
@@ -2034,6 +2038,9 @@ private fun TodayWorkoutsSection(workouts: List<WorkoutRow>) {
                         accent = workout.strain?.let { Palette.effortTint(it / StrainScorer.maxStrain) } ?: Palette.textPrimary,
                         delta = workout.energyKcal?.let { "${it.roundToInt()} kcal" },
                         deltaColor = Palette.metricAmber,
+                        // Keep the duration value readable beside the kcal chip on narrow phones — the
+                        // chip yields width instead of starving the value down to "4…"/"2…" (#332).
+                        compactDelta = true,
                     )
                 }
                 if (rowWorkouts.size == 1) Spacer(Modifier.weight(1f))

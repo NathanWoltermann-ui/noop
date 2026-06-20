@@ -52,6 +52,38 @@ object Baselines {
     /** Missing-night count after which a baseline is marked stale. */
     const val staleDays: Int = 14
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Early-life anti-anchoring (Reddit HRV report) — mirrors Baselines.swift
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // The original model seeds the center on the first valid night with spread pinned at the
+    // floor, then becomes "usable" at minNightsSeed. If those first few nights read artificially
+    // HIGH (a common cold-start artefact), three things compounded to lock the baseline high for
+    // ~2-3 weeks: (a) the seed fixed the mean high while spread sat at the floor; (b) the hard
+    // outlier gate then REJECTED the user's genuine LOWER nights (a true 54ms vs an anchored ~85ms
+    // baseline is >5× the floor spread → "seen but not folded"); (c) the still-tight spread made
+    // the z-score hypersensitive, crushing Charge to 1-2.
+    //
+    // The fix is conservative: during the baseline's EARLY life let reality pull the center down
+    // quickly, THEN settle to the normal long-term smoothing. Long-term behaviour (after
+    // earlyAdaptNights, once spread has lifted) is byte-identical to before.
+
+    /** Valid-night count below which the baseline is "young": fast center adaptation + suspended
+     *  hard-outlier gate. Chosen so convergence happens in days, not weeks. */
+    const val earlyAdaptNights: Int = 8
+
+    /** Center half-life (nights) used while the baseline is young — much faster than halfLifeB. */
+    const val earlyHalfLifeB: Double = 3.0
+
+    /** Multiplier on spread for the Winsor clamp while young, so an honest lower night isn't clamped
+     *  flat against a floor-tight band before the spread has had a chance to widen. */
+    const val earlySpreadInflate: Double = 2.5
+
+    /** SharedPreferences key for the manual HRV-baseline recalibration epoch (epoch SECONDS).
+     *  0 / absent = no recalibration. Written by the Settings "Recalibrate HRV baseline" button.
+     *  EXACT same key string as the iOS UserDefaults key. */
+    const val hrvBaselineEpochKey: String = "noop.hrvBaselineEpoch"
+
     /** Default per-metric configurations (HRV, resting HR, respiration, skin temp). */
     val metricCfg: Map<String, MetricCfg> = mapOf(
         "hrv" to MetricCfg(
@@ -142,8 +174,17 @@ object Baselines {
             )
         }
 
-        // Hard outlier rejection (only once seeded): seen, but not folded.
-        if (state.nValid >= minNightsSeed) {
+        // Is the baseline still "young"? While young we adapt faster and suspend the hard-outlier
+        // gate so genuine lower nights are never discarded before the spread reflects them. Tied to
+        // the valid-night count (NOT spread): a long flat history is settled even though its spread
+        // never lifted off the floor, and must still reject a wild one-off outlier.
+        val isYoung = state.nValid < earlyAdaptNights
+
+        // Hard outlier rejection (only once seeded AND no longer young): seen, but not folded.
+        // Suspending this during early life is the core anti-anchoring fix — a high seed with a
+        // floor-tight spread would otherwise reject the user's real, lower readings as "outliers"
+        // (a true 54ms vs an anchored ~90ms baseline is >5× the floor spread).
+        if (state.nValid >= minNightsSeed && !isYoung) {
             val dev = abs(value - state.baseline)
             if (dev > hardOutlierK * state.spread) {
                 return BaselineState(
@@ -163,10 +204,15 @@ object Baselines {
         }
 
         // Step 1: Winsorized EWMA update.
-        val lo = state.baseline - winsorK * state.spread
-        val hi = state.baseline + winsorK * state.spread
+        // While young, widen the clamp band (inflate the effective spread) so an honest lower night
+        // isn't clamped flat against a floor-tight band, and use the faster early center half-life so
+        // the center tracks reality in days. Both relax to the normal values once settled.
+        val effSpread = if (isYoung) state.spread * earlySpreadInflate else state.spread
+        val effLb = if (isYoung) lambda(earlyHalfLifeB) else lb
+        val lo = state.baseline - winsorK * effSpread
+        val hi = state.baseline + winsorK * effSpread
         val clamped = max(lo, min(hi, value))
-        val newBaseline = lb * clamped + (1.0 - lb) * state.baseline
+        val newBaseline = effLb * clamped + (1.0 - effLb) * state.baseline
 
         // Spread uses the UNCLAMPED value so true deviations are tracked.
         val absDev = abs(value - newBaseline)
@@ -187,6 +233,48 @@ object Baselines {
     fun foldHistory(values: List<Double?>, cfg: MetricCfg): BaselineState {
         var state: BaselineState? = null
         for (v in values) state = update(state, v, cfg)
+        state?.let { return it }
+        val seed = (cfg.minVal + cfg.maxVal) / 2.0
+        return BaselineState(
+            baseline = seed, spread = cfg.floorSpread, nValid = 0,
+            nightsSinceUpdate = 0, status = BaselineStatus.CALIBRATING,
+        )
+    }
+
+    /**
+     * Replay an ordered sequence of nightly values (oldest first) to build state, honouring a manual
+     * recalibration [baselineEpoch] (epoch SECONDS; 0 = no recalibration).
+     *
+     * [dayKeys] runs parallel to [values] ("yyyy-MM-dd", same order/length). Any night whose day
+     * STARTS (UTC) before [baselineEpoch] is ignored entirely (NOT a skip-and-hold — it is dropped,
+     * so the baseline re-seeds from the first on-or-after-epoch night). This lets the user reset a
+     * baseline that anchored too high: tap "Recalibrate HRV baseline" in Settings (which writes
+     * `now-seconds` to the [hrvBaselineEpochKey] pref) and the Charge baseline re-learns from tonight.
+     *
+     * When [baselineEpoch] <= 0 (the default / no recalibration) this is byte-identical to the plain
+     * [foldHistory]. The caller reads the persisted epoch from SharedPreferences (the analytics layer
+     * is Context-free) — exact same key string as the iOS UserDefaults key. Mirrors the Swift overload.
+     */
+    fun foldHistory(
+        values: List<Double?>,
+        dayKeys: List<String>,
+        cfg: MetricCfg,
+        baselineEpoch: Double,
+    ): BaselineState {
+        if (baselineEpoch <= 0.0) return foldHistory(values, cfg)
+
+        var state: BaselineState? = null
+        for (i in values.indices) {
+            // Drop (not skip-and-hold) any night dated before the recalibration epoch.
+            if (i < dayKeys.size) {
+                val dayStart = runCatching {
+                    java.time.LocalDate.parse(dayKeys[i])
+                        .atStartOfDay(java.time.ZoneOffset.UTC).toEpochSecond().toDouble()
+                }.getOrNull()
+                if (dayStart != null && dayStart < baselineEpoch) continue
+            }
+            state = update(state, values[i], cfg)
+        }
         state?.let { return it }
         val seed = (cfg.minVal + cfg.maxVal) / 2.0
         return BaselineState(

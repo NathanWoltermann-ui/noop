@@ -502,6 +502,18 @@ object RestScorer {
      */
     const val restorativeTargetShare: Double = 0.50
 
+    /**
+     * Deep-sleep share of asleep time that earns FULL restorative credit (~13% is the healthy floor
+     * for adults; below it the restorative term scales down toward [deepFloorFactor]). DEEP honesty
+     * (Reddit HRV/sleep report): pooling deep+REM let a night with normal REM but almost no DEEP earn
+     * near-full restorative credit (Rest read 95+ with little deep). Byte-identical to Swift.
+     */
+    const val deepShareTarget: Double = 0.13
+
+    /** Most the restorative term is scaled down when deep is ~absent — half, never zeroed, so a
+     *  low-deep night reads honestly without the whole night tanking. Swift parity. */
+    const val deepFloorFactor: Double = 0.5
+
     /** Neutral consistency (fraction) used when the caller supplies no regularity signal. Swift parity. */
     const val NEUTRAL_CONSISTENCY: Double = 0.5
 
@@ -532,9 +544,14 @@ object RestScorer {
         val durationScore = min(100.0, asleepHours / needHours * 100.0)
         // Efficiency (0..1 → 0..100), clamped.
         val efficiencyScore = (efficiency * 100.0).coerceIn(0.0, 100.0)
-        // Restorative share vs healthy target (clamped at 100).
+        // Restorative share vs healthy target (clamped at 100), then scaled by a gentle deep-adequacy
+        // factor in [deepFloorFactor, 1]: full once deep ≥ target share, ramping to the floor as
+        // deep → 0, so a near-zero-deep night loses up to half this term (~10 pts) — honest, not
+        // tanking, no fabricated stages. Mirrors Swift Rest.composite EXACTLY.
         val restorativeShare = (deepSeconds + remSeconds) / asleepSeconds
-        val restorativeScore = min(100.0, restorativeShare / restorativeTargetShare * 100.0)
+        val deepAdequacy = ((deepSeconds / asleepSeconds) / deepShareTarget).coerceIn(0.0, 1.0)
+        val deepFactor = deepFloorFactor + (1.0 - deepFloorFactor) * deepAdequacy
+        val restorativeScore = min(100.0, restorativeShare / restorativeTargetShare * 100.0) * deepFactor
 
         // Consistency uses a NEUTRAL 0.5 (→50) when the caller supplies none — matching the Swift
         // Rest.composite EXACTLY (parity is required; Swift adds a neutral term, it does NOT drop +

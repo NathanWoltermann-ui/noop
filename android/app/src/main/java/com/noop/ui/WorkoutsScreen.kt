@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -65,6 +66,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.noop.analytics.WorkoutSport
 import com.noop.data.WorkoutRow
 import java.time.Instant
 import java.time.ZoneId
@@ -1017,7 +1019,7 @@ private fun ManualWorkoutDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                DialogField("Sport", sport, onChange = { sport = it }, placeholder = "e.g. Running")
+                SportPickerField(sport, onChange = { sport = it })
                 DialogField("Started (minutes ago)", minsAgo, onChange = { minsAgo = it }, numeric = true)
                 DialogField("Duration (minutes)", durationMin, onChange = { durationMin = it }, numeric = true)
                 DialogField("Avg HR (bpm, optional)", avgHr, onChange = { avgHr = it }, numeric = true)
@@ -1050,6 +1052,53 @@ private fun ManualWorkoutDialog(
             }
         },
     )
+}
+
+/**
+ * Sport field for the manual add/edit dialog — a searchable PICKER over the shared catalogue
+ * ([WorkoutSport.all], the SAME list the live "Start a workout" sheet uses) with a free-text
+ * FALLBACK so an unusual sport NOOP doesn't enumerate still saves exactly as typed (#519). The text
+ * field IS the value: typing filters the catalogue beneath it; tapping a match fills the field; not
+ * tapping anything keeps whatever was typed. The list only shows while the typed text is a partial
+ * match (an exact catalogue hit, or a free-typed sport, collapses it).
+ */
+@Composable
+private fun SportPickerField(value: String, onChange: (String) -> Unit) {
+    val sportScroll = rememberScrollState()
+    val q = value.trim()
+    val matches = if (q.isEmpty()) WorkoutSport.all
+    else WorkoutSport.all.filter { it.name.contains(q, ignoreCase = true) }
+    // Hide the list once the field exactly equals a catalogue name (a settled choice) or once it's a
+    // free-typed sport with no partial matches — so the dialog isn't permanently half-covered.
+    val exact = WorkoutSport.all.any { it.name.equals(q, ignoreCase = true) }
+    val showList = matches.isNotEmpty() && !exact
+
+    DialogField("Sport", value, onChange = onChange, placeholder = "e.g. Running")
+    if (showList) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 168.dp)
+                .verticalScroll(sportScroll),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            matches.forEach { sp ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onChange(sp.name) }
+                        .padding(vertical = 8.dp),
+                ) {
+                    Text(sp.name, style = NoopType.body, color = Palette.textPrimary)
+                    if (sp.isDistanceSport) {
+                        Spacer(Modifier.width(6.dp))
+                        Text("· GPS", style = NoopType.footnote, color = Palette.textTertiary)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

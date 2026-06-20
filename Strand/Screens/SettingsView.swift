@@ -93,6 +93,14 @@ struct SettingsView: View {
     @State private var rawCsvBusy = false
     @State private var lastRawCsvURL: URL?
 
+    /// Scheduled daily debug auto-export (#510, parity with Android). Seeded from the persisted store;
+    /// the toggle + time picker write back through `ScheduledDebugExport`. Opt-in, default OFF.
+    @State private var debugExportOn = ScheduledDebugExport.isEnabled
+    @State private var debugExportMinutes = ScheduledDebugExport.timeMinutes
+
+    /// Confirm gate for the "Recalibrate Charge baseline" action (it re-learns the HRV anchor from tonight).
+    @State private var showRecalibrateConfirm = false
+
     /// "What's New" changelog sheet, reachable any time from About.
     @State private var showWhatsNew = false
 
@@ -120,6 +128,7 @@ struct SettingsView: View {
             unitsCard
             appearanceCard
             strapCard
+            recoveryCard
             experimentalCard
             backupCard
             aboutCard
@@ -128,6 +137,13 @@ struct SettingsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(backupAlertMessage)
+        }
+        .confirmationDialog("Recalibrate your Charge baseline?",
+                            isPresented: $showRecalibrateConfirm, titleVisibility: .visible) {
+            Button("Recalibrate") { recalibrateHrvBaseline() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("NOOP will start re-learning your Charge baseline from tonight's data onward. Use this if an early reading anchored it too high. Your existing data isn't deleted.")
         }
         .sheet(isPresented: $showWhatsNew) {
             WhatsNewView(onClose: { showWhatsNew = false })
@@ -781,6 +797,50 @@ struct SettingsView: View {
         return .positive
     }
 
+    // MARK: - Recovery (Charge baseline)
+
+    /// Advanced recovery controls. The Recalibrate button re-anchors the Charge (recovery) baseline from
+    /// tonight onward — the cure for a first reading that anchored the baseline too high. It writes the
+    /// `noop.hrvBaselineEpoch` setting (epoch SECONDS) the recovery engine reads, then kicks a recompute
+    /// the same way the sleep-edit path does (analyzeRecent → refresh).
+    private var recoveryCard: some View {
+        SettingsSection(
+            icon: "heart.text.square",
+            title: "Recovery",
+            blurb: "Your Charge score learns a personal baseline from your heart-rate variability over time. If an early reading set it too high, you can re-learn it from tonight."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    showRecalibrateConfirm = true
+                } label: {
+                    Label("Recalibrate Charge baseline", systemImage: "arrow.triangle.2.circlepath")
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.bordered)
+                .tint(StrandPalette.accent)
+
+                Text("Re-learns your Charge baseline from tonight onward — use if an early reading anchored it too high.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Write the recalibration anchor and trigger a recompute. The exact key + value the recovery-baseline
+    /// engine reads: `noop.hrvBaselineEpoch` = now, in epoch SECONDS (Double). Then re-score + refresh so
+    /// the change is reflected without a relaunch (same path as a sleep edit).
+    private func recalibrateHrvBaseline() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "noop.hrvBaselineEpoch")
+        Task {
+            await model.intelligence.analyzeRecent()
+            await model.repo.refresh()
+        }
+        backupAlertTitle = "Charge baseline recalibrating"
+        backupAlertMessage = "NOOP will re-learn your baseline from tonight's data onward."
+        showBackupAlert = true
+    }
+
     // MARK: - Backup & restore
 
     // MARK: - Experimental (WHOOP 5 / MG)
@@ -985,8 +1045,102 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider().overlay(StrandPalette.hairline)
+
+                scheduledExportControls
             }
         }
+        // Re-arm / catch-up the daily export whenever Settings appears (self-heals after a relaunch).
+        .onAppear { ScheduledDebugExport.activateIfEnabled() }
+    }
+
+    /// Daily auto-export of the strap log (#510 — parity with Android's DebugExportScheduler). Opt-in,
+    /// default OFF: a toggle + a time-of-day picker + a "Run now". Honest about iOS background timing —
+    /// the macOS drop is reliable (the app is usually running), the iOS one fires when iOS next wakes
+    /// NOOP near the chosen time, never guaranteed to the minute.
+    @ViewBuilder private var scheduledExportControls: some View {
+        Toggle(isOn: $debugExportOn) {
+            Text("Daily auto-export of the strap log")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textPrimary)
+        }
+        .toggleStyle(.switch)
+        .tint(StrandPalette.accent)
+        .onChangeCompat(of: debugExportOn) { on in ScheduledDebugExport.setEnabled(on) }
+
+        if debugExportOn {
+            HStack {
+                Text("Time of day")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Spacer()
+                DatePicker("", selection: debugExportTimeBinding, displayedComponents: .hourAndMinute)
+                    .labelsHidden()
+                    .accessibilityLabel("Daily auto-export time")
+            }
+
+            Button {
+                runScheduledExportNow()
+            } label: {
+                Label("Run now", systemImage: "square.and.arrow.down.on.square")
+                    .padding(.horizontal, 6)
+            }
+            .buttonStyle(.bordered)
+            .tint(StrandPalette.accent)
+        }
+
+        Text(debugExportCaption)
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Honest caption — the drop location plus the platform-specific timing reality.
+    private var debugExportCaption: String {
+        #if os(iOS)
+        return "Writes a timestamped copy of your strap log to NOOP's folder in the Files app, once a day — handy for a bug report without remembering to grab it. On iPhone it fires when iOS next wakes NOOP near your chosen time, not guaranteed to the minute (keep NOOP open overnight for the best chance). Everything stays on \(Platform.deviceNounPhrase); nothing is uploaded."
+        #else
+        return "Writes a timestamped copy of your strap log to your Documents folder, once a day — handy for a bug report without remembering to grab it. On Mac it runs while NOOP is open (and catches up on launch if the time passed while it was closed). Everything stays on \(Platform.deviceNounPhrase); nothing is uploaded."
+        #endif
+    }
+
+    /// Bridges the minutes-since-midnight store to the DatePicker, persisting + rescheduling on change
+    /// (mirrors SmartAlarmView's wakeBinding).
+    private var debugExportTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                var c = DateComponents()
+                c.hour = debugExportMinutes / 60
+                c.minute = debugExportMinutes % 60
+                return Calendar.current.date(from: c) ?? Date()
+            },
+            set: { date in
+                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                let m = (c.hour ?? 7) * 60 + (c.minute ?? 0)
+                debugExportMinutes = m
+                ScheduledDebugExport.setTimeMinutes(m)
+            }
+        )
+    }
+
+    /// "Run now": write an immediate timestamped strap-log drop (with the raw capture beside it, if a
+    /// session has recorded one) and tell the user where it landed.
+    private func runScheduledExportNow() {
+        model.ble.flushPuffinCaptures()
+        let url = ScheduledDebugExport.runNow(captureURL: live.puffinCaptureURL)
+        if let url {
+            backupAlertTitle = "Strap log exported"
+            #if os(iOS)
+            backupAlertMessage = "Saved \(url.lastPathComponent) to NOOP's folder in the Files app."
+            #else
+            backupAlertMessage = "Saved \(url.lastPathComponent) to your Documents folder."
+            #endif
+        } else {
+            backupAlertTitle = "Export failed"
+            backupAlertMessage = "Couldn't write the strap log right now."
+        }
+        showBackupAlert = true
     }
 
     /// Export the last 24h of decoded sensor streams for the connected strap to a CSV, then save (macOS

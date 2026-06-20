@@ -362,6 +362,7 @@ fun SleepScreen(
                     }
                 },
                 onPickNightDate = onPickNightDate,
+                napBlocks = night?.napBlocks ?: emptyList(),
             )
             if (model != null) {
                 Spacer(Modifier.height(Metrics.selectorTopUp))
@@ -519,6 +520,7 @@ private fun Hero(
     onDeleteSession: (SleepSession) -> Unit = {},
     onAddNap: (Long, Long) -> Unit = { _, _ -> },
     onPickNightDate: ((LocalDate) -> Unit)? = null,
+    napBlocks: List<SleepSession> = emptyList(),
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
         NightNavHeader(nightOffset, lastIndex, clock, onNavigate, session, onUpdateTimes, onDeleteSession, onAddNap, onPickNightDate)
@@ -589,6 +591,167 @@ private fun Hero(
                     )
                 }
             }
+        }
+        // Naps card (#508/#518): the day's blocks OTHER than the main night, each editable / deletable
+        // with the SAME mechanism main sleep uses, plus a Main / Nap(s) / Total split so what drives the
+        // day's Rest total is explainable. Mirrors iOS SleepView.napSection.
+        if (session != null) {
+            NapsCard(
+                main = session,
+                naps = napBlocks,
+                onEditNapTimes = onUpdateTimes,
+                onDeleteNap = onDeleteSession,
+            )
+        }
+    }
+}
+
+/**
+ * Naps card (#508/#518): the day's MAIN sleep is the hero above; this lists every OTHER block of the
+ * day (afternoon naps, split-sleep) as its own editable / deletable row, and — once the day has at
+ * least one nap — a Main / Nap(s) / Total split so the time driving the day's Rest total is explicit.
+ * A single-night day shows just the "No naps" line, reading exactly as before. Reuses the main-sleep
+ * edit/delete callbacks (they key off each row's immutable (deviceId, startTs)). Mirrors iOS
+ * SleepView.napSection.
+ */
+@Composable
+private fun NapsCard(
+    main: SleepSession,
+    naps: List<SleepSession>,
+    onEditNapTimes: (SleepSession, Long, Long) -> Unit,
+    onDeleteNap: (SleepSession) -> Unit,
+) {
+    val mainMin = (main.endTs - main.effectiveStartTs) / 60.0
+    val napMin = naps.sumOf { (it.endTs - it.effectiveStartTs) / 60.0 }
+    NoopCard(padding = Metrics.space14, tint = Palette.restColor) {
+        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+            Text("DAYTIME SLEEP", style = NoopType.overline, color = Palette.textTertiary)
+            Text("Naps", style = NoopType.subhead, color = Palette.textPrimary)
+            if (naps.isNotEmpty()) {
+                // Main / Nap(s) / Total split — only meaningful once a nap exists. Total = main + naps.
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    NapSummaryCell("Main sleep", durationText(mainMin), Modifier.weight(1f))
+                    NapSummaryCell("Nap(s)", durationText(napMin), Modifier.weight(1f))
+                    NapSummaryCell("Total", durationText(mainMin + napMin), Modifier.weight(1f))
+                }
+            }
+            if (naps.isEmpty()) {
+                Text(
+                    "No naps recorded for this day.",
+                    style = NoopType.caption,
+                    color = Palette.textTertiary,
+                )
+            } else {
+                naps.forEachIndexed { i, nap ->
+                    NapRow(nap, onEditNapTimes, onDeleteNap)
+                    if (i < naps.lastIndex) {
+                        Box(Modifier.fillMaxWidth().height(Metrics.divider).background(Palette.hairline))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One Main / Nap(s) / Total cell: an overline label over a duration number. (#518) */
+@Composable
+private fun NapSummaryCell(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(label, style = NoopType.overline, color = Palette.textTertiary)
+        Text(value, style = NoopType.captionNumber, color = Palette.textPrimary)
+    }
+}
+
+/** One nap row: its clock window + duration, with the SAME edit (re-pick start then end) and delete
+ *  affordances main sleep uses, keyed on the nap's own immutable (deviceId, startTs). The edit reuses
+ *  the night-edit picker pattern (bed time-of-day on the nap's own day, then a wake time-only derived
+ *  to the first instant after that start) so a nap can't be re-bucketed onto the wrong day. (#508/#518) */
+@Composable
+private fun NapRow(
+    nap: SleepSession,
+    onEditNapTimes: (SleepSession, Long, Long) -> Unit,
+    onDeleteNap: (SleepSession) -> Unit,
+) {
+    val context = LocalContext.current
+    var editingStart by remember(nap.startTs) { mutableStateOf(false) }
+    var editingEnd by remember(nap.startTs) { mutableStateOf(false) }
+    var pendingStart by remember(nap.startTs) { mutableStateOf(0L) }
+    val window = "${clockTimeLabel(nap.effectiveStartTs)}–${clockTimeLabel(nap.endTs)}"
+    val durMin = (nap.endTs - nap.effectiveStartTs) / 60.0
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) { contentDescription = "Nap $window, ${durationText(durMin)}" },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Bedtime, contentDescription = null, tint = Palette.restColor, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(Metrics.space10))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(window, style = NoopType.body, color = Palette.textPrimary)
+            Text(durationText(durMin), style = NoopType.overline, color = Palette.textTertiary)
+        }
+        Icon(
+            Icons.Filled.Edit,
+            contentDescription = if (nap.userEdited) "Edit nap times (edited)" else "Edit nap times",
+            tint = Palette.restColor,
+            modifier = Modifier.size(18.dp).clickable { editingStart = true },
+        )
+        Spacer(Modifier.width(Metrics.space12))
+        Icon(
+            Icons.Filled.DeleteOutline,
+            contentDescription = "Delete this nap",
+            tint = Palette.textTertiary,
+            modifier = Modifier.size(18.dp).clickable { onDeleteNap(nap) },
+        )
+    }
+
+    // Edit step 1 — nap START time-of-day, kept on the nap's own calendar day (only the hour/minute move).
+    if (editingStart) {
+        val startCal = Calendar.getInstance().apply { timeInMillis = nap.effectiveStartTs * 1000L }
+        DisposableEffect(Unit) {
+            val dialog = TimePickerDialog(
+                context,
+                { _, h, m ->
+                    val cal = Calendar.getInstance().apply {
+                        timeInMillis = nap.effectiveStartTs * 1000L
+                        set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
+                        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                    }
+                    pendingStart = cal.timeInMillis / 1000L
+                    editingStart = false
+                    editingEnd = true
+                },
+                startCal.get(Calendar.HOUR_OF_DAY), startCal.get(Calendar.MINUTE), true,
+            ).apply { setTitle("Nap started") }
+            dialog.setOnDismissListener { editingStart = false }
+            dialog.show()
+            onDispose { runCatching { dialog.dismiss() } }
+        }
+    }
+
+    // Edit step 2 — nap END time-only; its day DERIVED as the first instant strictly after the chosen
+    // start (within 24h), mirroring the wake-edit cross-day constraint so a nap stays on the right day.
+    if (editingEnd && pendingStart > 0L) {
+        val endCal = Calendar.getInstance().apply { timeInMillis = nap.endTs * 1000L }
+        DisposableEffect(Unit) {
+            val dialog = TimePickerDialog(
+                context,
+                { _, h, m ->
+                    val cal = Calendar.getInstance().apply {
+                        timeInMillis = pendingStart * 1000L
+                        set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
+                        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                        if (timeInMillis / 1000L <= pendingStart) add(Calendar.DAY_OF_MONTH, 1)
+                    }
+                    onEditNapTimes(nap, pendingStart, cal.timeInMillis / 1000L)
+                    editingEnd = false
+                    pendingStart = 0L
+                },
+                endCal.get(Calendar.HOUR_OF_DAY), endCal.get(Calendar.MINUTE), true,
+            ).apply { setTitle("Nap ended") }
+            dialog.setOnDismissListener { editingEnd = false }
+            dialog.show()
+            onDispose { runCatching { dialog.dismiss() } }
         }
     }
 }
@@ -1715,13 +1878,15 @@ internal data class SleepModel(
     val sleepDebtLedger: SleepDebtLedger,
 )
 
-/** The night the ◀/▶ chevrons selected: its session, the day-metric key it resolves to,
- *  its persisted per-epoch weights (or null) and the "EEE d MMM · HH:mm–HH:mm" clock. (#160) */
+/** The night the ◀/▶ chevrons selected: its MAIN session, the day-metric key it resolves to, its
+ *  persisted per-epoch weights (or null), the "EEE d MMM · HH:mm–HH:mm" clock, and the day's other
+ *  blocks (naps / split-sleep) for the naps card. (#160, #518) */
 internal data class HeroNight(
     val session: SleepSession,
     val dayKey: String,
     val realSegments: List<Pair<String, Float>>?,
     val clockLabel: String,
+    val napBlocks: List<SleepSession> = emptyList(),
 )
 
 /** What the hero card draws for the selected night — null means no usable stage data
@@ -1739,12 +1904,14 @@ internal data class HeroDisplay(
  * correctly disabled) instead of arrows that move within naps/split blocks of one night and
  * appear stuck (#57/#59). Mirrors iOS SleepView.decodedNight(at:)/navDays.
  *
- * The day's REPRESENTATIVE session is its last-ending block (the night's wake) — that carries
- * the wake time the daily-metric model + clock label key off. Clamped so a stale offset after a
- * data change shows the oldest day rather than nothing. The day key tries UTC then local-tz
- * attribution of the wake timestamp — imported DailyMetric.day is local-tz while dayString is
- * UTC, so a near-midnight-UTC wake needs the second key; both derive from THIS session's endTs,
- * never another night. (#160)
+ * The day's REPRESENTATIVE session is its MAIN sleep block — the LONGEST block, preferring an
+ * OVERNIGHT-anchored onset (#518). A day can hold an overnight AND an afternoon nap (both end on
+ * the same calendar day, so both bucket here); the OLD `maxByOrNull { endTs }` picked the
+ * latest-ending block, which is the afternoon nap — so the overnight vanished from the Sleep tab.
+ * Picking the longest overnight block fixes it; the other blocks are carried as `napBlocks` for
+ * the naps card. The day key tries UTC then local-tz attribution of the MAIN block's wake — imported
+ * DailyMetric.day is local-tz while dayString is UTC, so a near-midnight-UTC wake needs the second
+ * key; both derive from THIS night's endTs, never another night. (#160, #518)
  */
 internal fun selectNight(
     navDays: List<List<SleepSession>>,
@@ -1754,7 +1921,10 @@ internal fun selectNight(
     if (navDays.isEmpty()) return null
     val dayIdx = offset.coerceIn(0, navDays.size - 1)
     val blocks = navDays[dayIdx]
-    val session = blocks.maxByOrNull { it.endTs } ?: return null
+    val session = mainSleepBlock(blocks) ?: return null
+    // Everything else on the day is a nap / secondary block, oldest→newest for the naps card. (#518)
+    val napBlocks = blocks.filter { it.startTs != session.startTs }
+        .sortedBy { it.effectiveStartTs }
     val utcKey = AnalyticsEngine.dayString(session.endTs)
     val localKey = localDayString(session.endTs)
     val dayKey = listOf(utcKey, localKey).firstOrNull { key ->
@@ -1762,7 +1932,27 @@ internal fun selectNight(
     } ?: utcKey
     val segments = parsePersistedSegments(session.stagesJSON)
         ?.map { seg -> seg.stage to ((seg.end - seg.start) / 60f) }
-    return HeroNight(session, dayKey, segments, sessionClockLabel(session))
+    return HeroNight(session, dayKey, segments, sessionClockLabel(session), napBlocks)
+}
+
+/**
+ * The day's MAIN sleep block — the night people mean by "last night": the LONGEST block, preferring
+ * an OVERNIGHT-anchored one (onset ≥ 20:00 or < 10:00 local) so a long lazy afternoon nap can't
+ * out-rank a slightly shorter real night. Mirrors iOS SleepView.mainBlock / editTarget. (#518)
+ */
+internal fun mainSleepBlock(blocks: List<SleepSession>): SleepSession? =
+    blocks.maxWithOrNull(
+        compareBy<SleepSession> { if (isOvernightOnset(it.effectiveStartTs)) 1 else 0 }
+            .thenBy { it.endTs - it.effectiveStartTs },
+    )
+
+/** True when a block's onset falls in the overnight window (≥ 20:00 or < 10:00 local) — the hours a
+ *  real night begins. A block onset in the afternoon is a nap, never the main night, even if long.
+ *  Mirrors iOS SleepView.isOvernightOnset. (#518) */
+internal fun isOvernightOnset(ts: Long): Boolean {
+    val cal = java.util.Calendar.getInstance().apply { timeInMillis = ts * 1000L }
+    val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+    return h >= 20 || h < 10
 }
 
 /**

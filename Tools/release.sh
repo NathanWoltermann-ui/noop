@@ -32,13 +32,32 @@ VER="${1:?usage: release.sh <version> <asset...> [-- notes]}"; shift
 TAG="v$VER"
 NOTES="NOOP $TAG — see CHANGELOG.md."
 ASSETS=()
-# split args into assets + optional "-- notes", preserving the original arg list
-# so the SAME list can be replayed verbatim to forgejo-release.sh below.
-ORIG_ARGS=("$@")
+# split args into assets + optional "-- notes".
 while [ $# -gt 0 ]; do
   if [ "$1" = "--" ]; then shift; NOTES="${1:-$NOTES}"; break; fi
   ASSETS+=("$1"); shift
 done
+
+# ── iOS asset name compatibility ─────────────────────────────────────────────
+# AltStore caches a source's downloadURL. Older cached sources point at
+# NOOP-v<V>-ios.ipa; the current source points at NOOP-v<V>.ipa. To make BOTH
+# resolve (so a stranded user never hits "file doesn't exist" mid-update), every
+# release uploads the IPA under BOTH names. We make a sibling "-ios.ipa" copy of
+# any NOOP-v*.ipa here and append it to the asset list. (See docs/SAFEGUARDS.md
+# is unrelated; this is the AltStore fix from the v5.2.5 "-ios" 404 report.)
+for f in ${ASSETS[@]+"${ASSETS[@]}"}; do
+  case "$f" in
+    *NOOP-v*.ipa)
+      if [ -f "$f" ] && [ "${f%-ios.ipa}" = "$f" ]; then   # a real .ipa that isn't already -ios
+        alias_f="${f%.ipa}-ios.ipa"
+        cp -f "$f" "$alias_f" 2>/dev/null && ASSETS+=("$alias_f") \
+          && echo "  + iOS alias: $(basename "$alias_f")"
+      fi ;;
+  esac
+done
+# rebuild the forgejo arg list from the (now alias-expanded) assets + notes,
+# so the mirror uploads exactly the same set as GitHub.
+FORGE_ARGS=(${ASSETS[@]+"${ASSETS[@]}"} -- "$NOTES")
 
 # ── 1. GitHub (canonical) ────────────────────────────────────────────────────
 GH_TOKEN_FILE="$HOME/.config/noop/gh_token"
@@ -117,7 +136,7 @@ fi
 # ── 2. Forgejo mirror (best-effort; never aborts) ────────────────────────────
 echo "→ mirroring $TAG to Forgejo"
 if [ -x "$HERE/forgejo-release.sh" ]; then
-  if "$HERE/forgejo-release.sh" "$VER" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; then
+  if "$HERE/forgejo-release.sh" "$VER" ${FORGE_ARGS[@]+"${FORGE_ARGS[@]}"}; then
     :  # forgejo-release.sh prints its own success line
   else
     echo "  ⚠ Forgejo mirror failed (non-fatal — GitHub is canonical)" >&2
