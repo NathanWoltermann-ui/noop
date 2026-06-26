@@ -4404,7 +4404,7 @@ class WhoopBleClient(
         }
     }
 
-    private fun log(s: String) {
+    private fun log(s: String, domain: com.noop.testcentre.TestDomain? = null) {
         // A diagnostic log line must NEVER be able to crash the app. log() runs on the GATT binder
         // thread and from the background reconnect service, so an uncaught throw here takes the WHOLE
         // process down — which is exactly what happened in #453: a redaction-regex bug crashed the
@@ -4412,8 +4412,9 @@ class WhoopBleClient(
         // in here may propagate. (The regex bug itself is also fixed; this guarantees the class can't
         // recur.)
         try {
-            // Scrub personal identifiers FIRST so a user can safely share the strap log (#445).
-            val safe = redactPii(s)
+            // Scrub personal identifiers FIRST so a user can safely share the strap log (#445), THEN
+            // apply the optional Test Centre domain tag in front of the already-safe line.
+            val safe = taggedStrapLogLine(redactPii(s), domain)
             // logcat is opt-in (Settings → Strap → "Debug logging"); default OFF so normal users don't
             // emit the strap log to the system log. The in-app ring buffer below always records.
             if (debugLogcat) Log.d(TAG, safe)
@@ -4448,7 +4449,7 @@ class WhoopBleClient(
      * this client. The coordinator injects this as a closure so generic-HR lifecycle lines land in the
      * one log the user copies for a bug report. (Issue #421 — the generic-HR path used to be invisible.)
      */
-    fun externalLog(s: String) { log(s) }
+    fun externalLog(s: String, domain: com.noop.testcentre.TestDomain? = null) { log(s, domain) }
 
     /** Snapshot of the recent strap log, newest last, for the "Share strap log" diagnostics export. */
     fun exportLogText(): String = synchronized(logBuffer) { logBuffer.joinToString("\n") }
@@ -4502,6 +4503,12 @@ internal fun redactStrapLogPii(s: String): String = try {
 } catch (t: Throwable) {
     "[redaction error — line withheld]"
 }
+
+/** Prefix a compact, parseable domain marker onto an already-redacted strap-log line, or return it
+ *  unchanged when no domain is given (today's behaviour, byte-identical). The export filters on this
+ *  "[<id>] " marker. Pure and file-scope so it unit-tests without constructing the BLE client. */
+internal fun taggedStrapLogLine(redacted: String, domain: com.noop.testcentre.TestDomain?): String =
+    if (domain == null) redacted else "[${domain.id}] $redacted"
 
 /**
  * #580: a connected WHOOP 5/MG whose firmware acks SEND_HISTORICAL_DATA but emits ZERO type-0x2F offload
