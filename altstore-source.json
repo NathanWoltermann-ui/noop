@@ -18,6 +18,15 @@
       "screenshotURLs": [],
       "versions": [
         {
+          "version": "7.3.0",
+          "buildVersion": "156",
+          "date": "2026-06-27",
+          "localizedDescription": "NOOP 7.3.0. See the release notes for what changed.",
+          "downloadURL": "https://github.com/NoopApp/noop/releases/download/v7.3.0/NOOP-v7.3.0-ios.ipa",
+          "size": 12032030,
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "7.2.3",
           "buildVersion": "155",
           "date": "2026-06-25",
@@ -1009,12 +1018,12 @@
           "NSHealthUpdateUsageDescription": "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
         }
       },
-      "version": "7.2.3",
-      "buildVersion": "155",
-      "versionDate": "2026-06-25",
-      "versionDescription": "NOOP 7.2.3. See the release notes for what changed.",
-      "downloadURL": "https://github.com/NoopApp/noop/releases/download/v7.2.3/NOOP-v7.2.3-ios.ipa",
-      "size": 11827763,
+      "version": "7.3.0",
+      "buildVersion": "156",
+      "versionDate": "2026-06-27",
+      "versionDescription": "NOOP 7.3.0. See the release notes for what changed.",
+      "downloadURL": "https://github.com/NoopApp/noop/releases/download/v7.3.0/NOOP-v7.3.0-ios.ipa",
+      "size": 12032030,
       "minOSVersion": "17.0"
     }
   ],
