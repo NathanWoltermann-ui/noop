@@ -754,6 +754,18 @@ struct TodayView: View {
         let f = DateFormatter(); f.dateFormat = "EEE d MMM"; f.locale = Locale(identifier: "en_US_POSIX"); return f
     }()
 
+    /// The selected day as a small locale-aware numeric date ("28/06/2026" or "6/28/2026" per region). The
+    /// top bar shows just this now, no "Today" / "Yesterday" word and no prev/next arrows. Day-change is by
+    /// horizontal swipe or by tapping to open the picker, and the rotating hint below teaches both.
+    private var dayNavDateText: String {
+        selectedLogicalDay.formatted(date: .numeric, time: .omitted)
+    }
+
+    /// Periodic one-word hint shown in place of the date for ~1.5s every ~10s (nil = show the date). With the
+    /// arrows gone the day-nav affordances are otherwise invisible, so this teaches them in the accent colour.
+    @State private var dayNavHint: String? = nil
+    private static let dayNavHints = ["Swipe", "Tap"]
+
     /// #817 - the day-nav swipe. A horizontal drag flips the day: swipe right (toward today) to the newer
     /// day, swipe left to the older one. Gated so it only fires on a clearly-horizontal drag past a small
     /// threshold (vertical scrolling keeps winning), and clamped to `0 ... earliestDayOffset` so it can't
@@ -795,48 +807,25 @@ struct TodayView: View {
     @ViewBuilder private var todayTopBar: some View {
         HStack(alignment: .center, spacing: 10) {
             Button { showDayPicker = true } label: {
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 5) {
-                        Text(dayNavLabel)
-                            .font(.system(size: 27, weight: .bold, design: .rounded))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Text(selectedLogicalDay.formatted(.dateTime.weekday(.wide).day().month(.wide)))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-                .contentShape(Rectangle())
+                // Just the date, small (locale numeric), no relative word and no prev/next arrows. Every ~10s
+                // it swaps for ~1.5s to a one-word "Swipe" / "Tap" hint in the accent colour so users learn
+                // they can change the day by swiping across or tapping here. fixedSize makes it claim its own
+                // width so a tight top bar never compresses it, and the trailing icon cluster keeps its room.
+                Text(dayNavHint ?? dayNavDateText)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(dayNavHint != nil ? StrandPalette.accent : StrandPalette.textPrimary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .contentTransition(.opacity)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(dayNavLabel). Change day")
+            .layoutPriority(1)
+            .accessibilityLabel("\(dayNavLabel). Swipe or tap to change day")
             .popover(isPresented: $showDayPicker) {
                 DatePicker("", selection: dayPickerBinding, in: ...Date(), displayedComponents: [.date])
                     .datePickerStyle(.graphical).labelsHidden().padding(12)
             }
-
-            // #817 - prev/next day chevrons beside the date. ‹ steps OLDER (disabled at the earliest banked
-            // day), › steps NEWER (disabled at today, so no future day). Same clamp as the swipe gesture, so
-            // both day-nav affordances share one bound.
-            topNavChevron("chevron.left", enabled: selectedDayOffset < earliestDayOffset) {
-                StrandHaptic.selection.play()
-                withAnimation(StrandMotion.interactive) {
-                    selectedDayOffset = Self.clampedDayOffset(current: selectedDayOffset, delta: 1,
-                                                              maxOffset: earliestDayOffset)
-                }
-            }
-            .accessibilityLabel("Previous day")
-            topNavChevron("chevron.right", enabled: selectedDayOffset > 0) {
-                StrandHaptic.selection.play()
-                withAnimation(StrandMotion.interactive) {
-                    selectedDayOffset = Self.clampedDayOffset(current: selectedDayOffset, delta: -1,
-                                                              maxOffset: earliestDayOffset)
-                }
-            }
-            .accessibilityLabel("Next day")
 
             Spacer(minLength: 8)
 
@@ -895,18 +884,19 @@ struct TodayView: View {
             }
         }
         .frame(height: 46)
-    }
-
-    private func topNavChevron(_ name: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(enabled ? StrandPalette.accent : StrandPalette.textTertiary)
-                .frame(width: 36, height: 36)
-                .contentShape(Rectangle())
+        // Cycle the swipe/tap hint: roughly every 10s flash a one-word hint for ~1.5s, alternating "Swipe" /
+        // "Tap", then return to the date. One async loop, auto-cancelled when Today goes away (no leaked timer).
+        .task {
+            var i = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                if Task.isCancelled { break }
+                withAnimation(.easeInOut(duration: 0.3)) { dayNavHint = Self.dayNavHints[i % Self.dayNavHints.count] }
+                i += 1
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                withAnimation(.easeInOut(duration: 0.3)) { dayNavHint = nil }
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
     }
 
     /// Settings presented as a sheet from the top-bar profile button (sheets inherit the app
@@ -1549,6 +1539,34 @@ struct TodayView: View {
                     // S4: the SEPARATE Readiness block now lives here, behind the Charge-ring tap, instead of
                     // a full-width card on the home screen (a one-word read stays on the hero, #205).
                     readinessSheetBody
+
+                    // UX differentiation: everything above is what shaped YOUR Charge today; this opens the
+                    // general METHOD behind the score, so the two are clearly separated, not conflated. It
+                    // pushes within this sheet's own NavigationStack, so there is no second modal to manage.
+                    NavigationLink {
+                        ScoringGuideView(initialSection: .charge, onClose: { showChargeBreakdown = false })
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "function")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(StrandPalette.chargeColor)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("How Charge is calculated")
+                                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                                Text("The method behind the score, not today's values.")
+                                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
+                        .padding(14)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(StrandPalette.surfaceInset))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("How Charge is calculated. The method behind the score.")
                 }
                 .padding(NoopMetrics.screenPadding)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2303,14 +2321,13 @@ struct TodayView: View {
         @ViewBuilder ring: () -> RingBody
     ) -> some View {
         VStack(spacing: 8) {
-            // A1: when the column is tappable (Charge), wrap the ring in a button and overlay a small
-            // chevron cue at the ring's bottom edge, INSIDE the ring's own frame (`.overlay`) so the cue
-            // never adds to the column's stacked height. The non-tappable rings render unchanged.
+            // A1: when the column is tappable (Charge), wrap the ring in a button (the body is just the ring
+            // with a contentShape so the whole disc is hittable). The tappable ring carries NO in-ring cue:
+            // the single affordance is the label chevron below it (see the comment near the Button below).
+            // The non-tappable rings render unchanged.
             if let onRingTap {
                 Button(action: onRingTap) {
-                    ring()
-                        .overlay(alignment: .bottom) { ringTapCue }
-                        .contentShape(Rectangle())
+                    ring().contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(Self.domainLabel(domain))
@@ -2319,7 +2336,10 @@ struct TodayView: View {
             } else {
                 ring()
             }
-            Button { guideSection = section } label: {
+            // ONE chevron affordance under every ring, so the row reads uniformly (no second cue on the
+            // Charge ring). Charge's chevron opens the "what shaped it" breakdown (its richest explanation);
+            // Effort / Rest open their scoring-guide section.
+            Button { if let onRingTap { onRingTap() } else { guideSection = section } } label: {
                 HStack(spacing: 3) {
                     // The CHARGE/EFFORT/REST hero label is localized: the catalog key is the natural-case
                     // domain word (Charge/Effort/Rest) and `.textCase(.uppercase)` does the uppercasing in
@@ -2336,7 +2356,8 @@ struct TodayView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Self.domainGuideAccessibilityLabel(domain))
+            .accessibilityLabel(onRingTap == nil ? Self.domainGuideAccessibilityLabel(domain)
+                                                  : "See what shaped your Charge")
             // Component 4 — the real per-day source under the ring (only when this score has a value for
             // the day AND we resolved its winner; a calibrating / empty ring shows no provenance badge).
             // Apple Watch (M1): a watch-sourced score reads "Apple Watch" with its confidence bound to the
@@ -2361,21 +2382,6 @@ struct TodayView: View {
         }
     }
 
-    /// A1: the small "tap me" chevron cue overlaid on the tappable Charge ring. A near-black circular
-    /// chip with a chevron, tinted to the Charge world, sat at the ring's bottom edge INSIDE the ring frame
-    /// so it adds no stacked height (the #762 self-sizing row is untouched). Decorative: the button's own
-    /// accessibility label/hint carry the action, so this is hidden from VoiceOver.
-    private var ringTapCue: some View {
-        Image(systemName: "chevron.down")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(StrandPalette.chargeColor)
-            .frame(width: 18, height: 18)
-            .background(Circle().fill(StrandPalette.surfaceBase))
-            .overlay(Circle().stroke(StrandPalette.chargeColor.opacity(0.35), lineWidth: 1))
-            .offset(y: 9)
-            .accessibilityHidden(true)
-    }
-
     /// Whether the score behind a provenance key has a real value for the selected day — gates the ring's
     /// provenance badge so it only appears alongside an actual number (Charge = recovery, Rest = restScore).
     private func ringHasValue(_ metricKey: String) -> Bool {
@@ -2393,6 +2399,14 @@ struct TodayView: View {
         if let s = score {
             GlowRing(fraction: s / 100, value: s, format: { "\(Int($0.rounded()))" },
                      color: StrandPalette.chargeColor, diameter: diameter, lineWidth: diameter * 0.10)
+        } else if recoveryCalibration == nil, let carried = lastScoredCharge {
+            // #802: a CARRIED last-night Charge draws as a real (dimmed) ring, matching the Rest ring, rather
+            // than a bare number on a faint track, which read as broken next to Rest's filled ring. Same
+            // diameter, so the #762 self-sizing hero row is untouched; the dim + the row-level "Last night"
+            // caption already beneath the rings mark it as carried, not today's fresh score.
+            GlowRing(fraction: carried.value / 100, value: carried.value, format: { "\(Int($0.rounded()))" },
+                     color: StrandPalette.chargeColor, diameter: diameter, lineWidth: diameter * 0.10)
+                .opacity(0.8)
         } else {
             emptyHeroRing(diameter: diameter) { ringEmptyOverlay(d: d, diameter: diameter) }
         }
@@ -2482,13 +2496,10 @@ struct TodayView: View {
     /// the arc fraction and the gauge's "of N" caption so both follow the toggle (#313).
     private var effortGaugeMax: Double { effortScale == .whoop ? 21 : 100 }
 
-    /// Honest overlay shown over the Charge ring when today's recovery is nil: calibrating count, the
-    /// last scored Charge carried over, or No data. After the logical-day rollover the new day has no
-    /// recovery until tonight is scored; rather than a bare "No data" on the hero ring while live HR
-    /// ticks (which reads as broken, #543), show the most recent scored Charge as a centred read-out
-    /// clearly stamped "Last night · <date>". The ring TRACK stays empty (today genuinely isn't scored,
-    /// so we never fill the GlowRing as if it were today's number) — the carried value sits inside it as
-    /// a labelled prior reading, the way WHOOP keeps last recovery visible until the new one lands.
+    /// Honest overlay shown over the Charge ring when today's recovery is nil: either the calibrating
+    /// count or No data. The carried last-scored Charge case is NOT handled here anymore: chargeRing now
+    /// intercepts it and draws a dimmed FILLED ring (so it reads like the Rest ring, not a bare number on
+    /// an empty track, #802). This overlay therefore only covers the calibrating and no-data cases.
     @ViewBuilder
     private func ringEmptyOverlay(d: DailyMetric?, diameter: CGFloat) -> some View {
         VStack(spacing: 3) {
@@ -2499,22 +2510,6 @@ struct TodayView: View {
                     .lineLimit(1).minimumScaleFactor(0.7).fixedSize()
                 Text("\(n) of \(Baselines.minNightsSeed)").font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                     .lineLimit(1)
-            } else if let carried = lastScoredCharge {
-                // Ring text consistency (#hero): the carried "49%" centre number renders in the SAME size +
-                // weight as a filled ring's number (GlowRing.centerFont), so a carried Charge, a clean "93"
-                // and a "No data" ring all share one centre-number style. Its "Last night" subtitle stays a
-                // footnote, matching the calibrating subtitle.
-                Text("\(Int(carried.value.rounded()))%")
-                    .font(GlowRing.centerFont(diameter: diameter))
-                    .monospacedDigit()
-                    .foregroundStyle(StrandPalette.recoveryColor(carried.value))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                Text(carried.caption)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
             } else {
                 ringNoData(diameter: diameter)
             }
@@ -2665,7 +2660,11 @@ struct TodayView: View {
             // pinned/selected tile is dropped or reordered (#251); the rest just fold until the expander.
             LazyVGrid(columns: grid, alignment: .leading, spacing: NoopMetrics.gap) {
                 ForEach(visibleKeyMetrics) { metric in
+                    // Fill the row height so both cards in a row are equal height: otherwise a taller tile
+                    // (e.g. Rest with its sparkline) leaves its row-mate short, and the empty space below the
+                    // shorter card reads as an uneven gap on one side of the grid.
                     keyMetricTile(metric)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             if metricsHasOverflow {
@@ -3698,16 +3697,21 @@ private struct RecordingStatusLight: View {
     }
 
     var body: some View {
-        if let state = TodayView.recordingState(live: live, selectedDayOffset: selectedDayOffset) {
-            Button(action: onTap) {
-                Circle().fill(StrandPalette.surfaceInset)
-                    .frame(width: 36, height: 36)
-                    .overlay(Circle().fill(hue(state)).frame(width: 10, height: 10))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(state.accessibilityText)
+        // The 36pt chip ALWAYS renders so the top-bar icon row never jumps when you scrub to a past day.
+        // A live recording state colours the dot (green / amber / red); a past day (no state) shows a muted
+        // dot and the chip is non-actionable, recording status only means something for today.
+        let state = TodayView.recordingState(live: live, selectedDayOffset: selectedDayOffset)
+        Button(action: onTap) {
+            Circle().fill(StrandPalette.surfaceInset)
+                .frame(width: 36, height: 36)
+                .overlay(Circle()
+                    .fill(state.map(hue) ?? StrandPalette.textTertiary.opacity(0.4))
+                    .frame(width: 10, height: 10))
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .disabled(state == nil)
+        .accessibilityLabel(state?.accessibilityText ?? "Recording status, not shown for a past day")
     }
 }
 

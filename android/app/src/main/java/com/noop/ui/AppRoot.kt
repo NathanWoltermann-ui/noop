@@ -198,7 +198,7 @@ private val drawerGroups: List<DrawerGroup> = listOf(
     ), defaultExpanded = false),
     DrawerGroup("App", listOf(
         Destination.Automations, Destination.SmartAlarm, Destination.Notifications,
-        Destination.Settings, Destination.Support,
+        Destination.TestCentre, Destination.Settings, Destination.Support,
     ), defaultExpanded = false),
 )
 

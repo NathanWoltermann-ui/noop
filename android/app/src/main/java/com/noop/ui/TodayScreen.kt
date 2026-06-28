@@ -24,15 +24,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Bedtime
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Functions
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -66,6 +67,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
@@ -117,7 +119,9 @@ import com.noop.ingest.HealthConnectImporter
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.chrono.IsoChronology
 import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
 import java.time.format.FormatStyle
 import java.time.temporal.ChronoUnit
 import java.util.Calendar
@@ -826,10 +830,8 @@ fun TodayScreen(
         // hero below, mirroring iOS. Staggered in as the first section (index 0).
         Box(modifier = Modifier.fillMaxWidth().staggeredAppear(0)) {
             TodayTopBar(
-                dayLabel = dayNavShortLabel(selectedDayOffset, selectedDay),
-                fullDate = headerFullDate(selectedDay),
+                dateText = dayNavNumericDate(selectedDay),
                 selectedDay = selectedDay,
-                selectedOffset = selectedDayOffset,
                 recordingState = headerRecordingState,
                 onPickDay = { offset -> selectedDayOffset = offset },
                 updateStore = updateStore,
@@ -853,11 +855,14 @@ fun TodayScreen(
             // While the strap is mid-offload, say so — empty tiles read as final otherwise (#77).
             if (liveSnap.backfilling) SyncingHistoryNote(chunks = liveSnap.syncChunksThisSession)
             // Explained score state (COMPONENT 2): when there's no own number to show, say WHY and WHAT to
-            // do — "Calibrating" (N more nights, no fake number) or "Needs the strap" (no data overnight).
-            // The CarriedLastNight state is already shown in full on the hero (the prior value + its date
-            // stamp), so it isn't repeated here. Today only; never a fabricated value.
+            // do. "Calibrating" (N more nights, no fake number), "Last night · <date>" (#802 carry-over)
+            // or "Needs the strap" (no data overnight). The carried Charge now draws a dimmed filled ring on
+            // the hero with NO in-ring caption, so its "Last night ..." note renders BELOW the rings here,
+            // matching iOS explainedScoreNote. Today only; never a fabricated value.
             if (selectedDayOffset == 0 &&
-                (scoreState is ScoreState.Calibrating || scoreState is ScoreState.NeedsStrap)
+                (scoreState is ScoreState.Calibrating ||
+                    scoreState is ScoreState.CarriedLastNight ||
+                    scoreState is ScoreState.NeedsStrap)
             ) {
                 ScoreStateNote(scoreState)
             }
@@ -1163,6 +1168,13 @@ fun TodayScreen(
                 carriedDay = lastScoredRecoveryDay,
                 showReadiness = selectedDayOffset == 0,
                 onClose = { showChargeBreakdown = false },
+                // "How Charge is calculated" → close the breakdown and open the scoring guide at the Charge
+                // section, the same target the per-ring ⓘ buttons use. Mirrors the iOS NavigationLink to
+                // ScoringGuideView(initialSection: .charge) whose onClose dismisses the breakdown.
+                onHowCalculated = {
+                    showChargeBreakdown = false
+                    openGuide(ScoreSection.CHARGE)
+                },
             )
         }
     }
@@ -1393,19 +1405,34 @@ private fun ScoringGuideIntroCard(onOpen: () -> Unit, onDismiss: () -> Unit) {
 
 // MARK: - Today top bar (iOS TodayView.todayTopBar parity)
 //
-// An Apple-style large-title header: a tappable "Today ⌄" big title + the full date on the LEFT (taps to
-// open the date picker), then a trailing row of UNIFORM 36dp circular icons — a recording-status light, the
-// updates bell, the gold quick-add (+), and the menu/settings avatar. All icons share the same 36dp size,
-// matching iOS. Replaces the old centred day-nav pill; day navigation is now driven by the title tap + the
-// graphical date picker (the older/newer chevrons fold into the picker, as on iOS).
+// A compact header: JUST the selected day as a small locale-numeric date on the LEFT (taps to open the date
+// picker), then a trailing row of UNIFORM 36dp circular icons (a recording-status light, the updates bell,
+// the gold quick-add (+), and the menu/settings avatar). No "Today" / "Yesterday" word, no prev/next
+// chevrons and no full-date subtitle now: day-change is by horizontal swipe across the dashboard or by
+// tapping the date, and a one-word "Swipe" / "Tap" hint flashes periodically in the accent colour to teach
+// the now-invisible gestures. Mirrors iOS todayTopBar.
 
-/** The short day-nav label: Today / Yesterday / "EEE d MMM", driven by the screen's own offset + day
- *  (NOT LocalDate.now()) so the header label and the data day never drift. */
-private fun dayNavShortLabel(selectedOffset: Int, selectedDay: LocalDate): String = when (selectedOffset) {
-    0 -> "Today"
-    1 -> "Yesterday"
-    else -> selectedDay.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.US))
+/** The top-bar date: JUST the selected day as a SMALL locale-numeric string ("28/06/2026" or "6/28/2026"
+ *  per region), driven by the screen's own day (NOT LocalDate.now()) so the header and the data day never
+ *  drift. No "Today" / "Yesterday" word and no prev/next arrows now: day-change is by horizontal swipe or
+ *  by tapping to open the picker, and a rotating one-word hint teaches both. Mirrors iOS dayNavDateText. */
+private fun dayNavNumericDate(selectedDay: LocalDate): String {
+    // iOS `.numeric` yields a 4-digit year (e.g. 28/06/2026). The plain localized SHORT style yields a
+    // 2-digit year (M/d/yy) in many locales, so we take the locale's SHORT pattern, widen any 2-y year
+    // field ("yy") to a 4-digit one ("yyyy"), and keep every other locale ordering/separator as-is. Locale
+    // -aware: the field order is never hardcoded to a single region.
+    val locale = Locale.getDefault()
+    val shortPattern = DateTimeFormatterBuilder.getLocalizedDateTimePattern(
+        FormatStyle.SHORT, null, IsoChronology.INSTANCE, locale,
+    )
+    // Replace a run of EXACTLY two y (a 2-digit year) with yyyy; leave single-y or already-4-y untouched.
+    val fourDigitYearPattern = shortPattern.replace(Regex("(?<!y)yy(?!y)"), "yyyy")
+    return selectedDay.format(DateTimeFormatter.ofPattern(fourDigitYearPattern, locale))
 }
+
+/** The two one-word day-nav hints flashed in place of the date, alternating, in the accent colour. With the
+ *  arrows gone the swipe / tap affordances are otherwise invisible, so this teaches them. Mirrors iOS. */
+private val DAY_NAV_HINTS = listOf("Swipe", "Tap")
 
 // MARK: - Day navigation (#817) - chevron arrows + horizontal swipe, iOS parity
 //
@@ -1442,17 +1469,10 @@ internal fun dayNavSwipeTarget(selectedOffset: Int, dragX: Float, thresholdPx: F
     else -> dayNavNewer(selectedOffset)
 }
 
-/** The full date subtitle under the large title, e.g. "Tuesday, 23 June" — mirrors iOS's
- *  weekday().day().month() stamp so the header shows the explicit day the data belongs to. */
-private fun headerFullDate(selectedDay: LocalDate): String =
-    selectedDay.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.US))
-
 @Composable
 private fun TodayTopBar(
-    dayLabel: String,
-    fullDate: String,
+    dateText: String,
     selectedDay: LocalDate,
-    selectedOffset: Int,
     recordingState: RecordingState?,
     onPickDay: (Int) -> Unit,
     updateStore: UpdateStore?,
@@ -1492,28 +1512,39 @@ private fun TodayTopBar(
         }
     }
 
+    // The rotating one-word hint shown in place of the date (null = show the date). Roughly every 10s it
+    // flashes a hint for ~1.5s, alternating "Swipe" / "Tap", in the accent colour, then returns to the date.
+    // With the arrows gone these are the only cues for the swipe / tap day-nav, so this teaches them. One
+    // coroutine, auto-cancelled when the top bar leaves composition (no leaked timer). Mirrors iOS .task.
+    var dayNavHint by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        var i = 0
+        while (true) {
+            kotlinx.coroutines.delay(10_000)
+            dayNavHint = DAY_NAV_HINTS[i % DAY_NAV_HINTS.size]
+            i++
+            kotlinx.coroutines.delay(1_500)
+            dayNavHint = null
+        }
+    }
+    // Fade the colour between the normal date (primary) and the accent-coloured hint, mirroring the iOS
+    // easeInOut colour swap. The text itself crossfades between the date string and the hint word.
+    val dateColor by animateColorAsState(
+        targetValue = if (dayNavHint != null) Palette.accent else Palette.textPrimary,
+        label = "day-nav-hint-color",
+    )
+
     Row(
         modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // #817 - ◀ chevron: step one day OLDER. Unbounded back-navigation (no lower edge), mirroring the
-        // iOS DayNavBar "Previous day" chevron. A compact 28dp glyph so it sits flush against the large
-        // title without stealing the icon row's width.
-        IconButton(
-            onClick = { onPickDay(dayNavOlder(selectedOffset)) },
-            modifier = Modifier.size(28.dp),
-        ) {
-            Icon(
-                Icons.Filled.ChevronLeft,
-                contentDescription = "Previous day",
-                tint = Palette.accent,
-                modifier = Modifier.size(20.dp),
-            )
-        }
-
-        // LEFT — the tappable large title ("Today ⌄") over the full date. Taps open the date picker.
-        Column(
+        // LEFT side: JUST the date, small (locale numeric), no relative word and no prev/next arrows. Taps open
+        // the date picker; a horizontal swipe across the dashboard still changes the day. Every ~10s it
+        // swaps for ~1.5s to a one-word "Swipe" / "Tap" hint in the accent colour so users learn the now-
+        // invisible day-nav gestures. weight(1f) so the date claims the leading room and never pushes the
+        // trailing icon cluster, which sits after this. Mirrors iOS dayNavDateText + the .task hint loop.
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(Metrics.cornerSm))
@@ -1523,47 +1554,19 @@ private fun TodayTopBar(
                     onClickLabel = "Change day",
                     onClick = { showPicker = true },
                 )
-                .semantics { contentDescription = "$dayLabel. Change day" },
-            verticalArrangement = Arrangement.spacedBy(1.dp),
+                .semantics { contentDescription = "$dateText. Swipe or tap to change day" },
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Crossfade(targetState = dayNavHint ?: dateText, label = "day-nav-date") { label ->
                 Text(
-                    dayLabel,
-                    style = NoopType.title1,
-                    color = Palette.textPrimary,
+                    label,
+                    // ~13sp SemiBold, matching the iOS .system(size: 13, weight: .semibold). subhead is the
+                    // 13sp house style; override its weight to semibold for the bolder date stamp.
+                    style = NoopType.subhead.copy(fontWeight = FontWeight.SemiBold),
+                    color = dateColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Icon(
-                    Icons.Filled.KeyboardArrowDown,
-                    contentDescription = null,
-                    tint = Palette.textTertiary,
-                    modifier = Modifier.size(16.dp),
-                )
             }
-            Text(
-                fullDate,
-                style = NoopType.subhead,
-                color = Palette.textSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-
-        // #817 - ▶ chevron: step one day NEWER, DISABLED on today so a future day can't be selected
-        // (greyed glyph). Mirrors the iOS DayNavBar "Next day" chevron + its `canGoNewer` gate.
-        val canGoNewer = dayNavCanGoNewer(selectedOffset)
-        IconButton(
-            onClick = { if (canGoNewer) onPickDay(dayNavNewer(selectedOffset)) },
-            enabled = canGoNewer,
-            modifier = Modifier.size(28.dp),
-        ) {
-            Icon(
-                Icons.Filled.ChevronRight,
-                contentDescription = "Next day",
-                tint = if (canGoNewer) Palette.accent else Palette.textTertiary,
-                modifier = Modifier.size(20.dp),
-            )
         }
 
         // RIGHT — the UNIFORM 36dp circular icon set: recording-status light · bell · + · avatar. All
@@ -1573,10 +1576,10 @@ private fun TodayTopBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             // Recording-status light — a colour-coded dot inside a 36dp inset disc (green recording /
-            // amber synced / red not-recording / accent experimental). Today only; tap routes to connect.
-            if (recordingState != null) {
-                RecordingStatusLight(state = recordingState, onClick = onRecordingTap)
-            }
+            // amber synced / red not-recording / accent experimental). The chip ALWAYS renders so the icon
+            // row never jumps when you scrub to a past day; a past day (null state) shows a muted,
+            // non-interactive dot, recording status only means something for today. Mirrors iOS.
+            RecordingStatusLight(state = recordingState, onClick = onRecordingTap)
             // Updates bell (36dp inset disc + gold unread pill).
             if (updateStore != null) {
                 UpdateBell(unreadCount = updateStore.unreadCount, onClick = onOpenUpdates)
@@ -1604,26 +1607,41 @@ private fun TodayTopBar(
 
 /** The top-bar recording-status light: a 36dp inset disc with a centred colour-coded dot — green while
  *  recording, amber after a recent sync, red when not recording, accent for the 5.0 experimental-history
- *  state. Tap routes to connect. Mirrors the iOS top-bar recording light + recordingHue (a plain dot). */
+ *  state. The chip ALWAYS renders so the top-bar icon row never jumps when you scrub to a past day; a past
+ *  day ([state] == null, no live state) shows a MUTED dot (textTertiary at 0.4 alpha) and is NON-clickable,
+ *  recording status only means something for today. Tap (today only) routes to connect. Mirrors the iOS
+ *  top-bar RecordingStatusLight + recordingHue (a plain dot). */
 @Composable
-private fun RecordingStatusLight(state: RecordingState, onClick: () -> Unit) {
+private fun RecordingStatusLight(state: RecordingState?, onClick: () -> Unit) {
+    // A live state colours the dot; a past day (null) reads as a muted, non-actionable tertiary dot.
     val hue = when (state) {
         RecordingState.Recording -> Palette.statusPositive
         is RecordingState.LastSynced -> Palette.statusWarning
         RecordingState.NotRecording -> Palette.statusCritical
         RecordingState.HistoryExperimental -> Palette.accent
+        null -> Palette.textTertiary.copy(alpha = 0.4f)
+    }
+    val label = if (state != null) {
+        "${state.title}. ${state.detail}"
+    } else {
+        "Recording status, not shown for a past day"
+    }
+    // Only today's chip is tappable; a past day's muted dot is inert (no clickable, matching iOS .disabled).
+    val base = Modifier
+        .size(Metrics.iconButton)
+        .clip(CircleShape)
+        .background(Palette.surfaceInset)
+    val tappable = if (state != null) {
+        base.clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = onClick,
+        )
+    } else {
+        base
     }
     Box(
-        modifier = Modifier
-            .size(Metrics.iconButton)
-            .clip(CircleShape)
-            .background(Palette.surfaceInset)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .semantics { contentDescription = "${state.title}. ${state.detail}" },
+        modifier = tappable.semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
         Box(
@@ -1753,18 +1771,41 @@ private fun ScoreHeroRow(
                     onRingTap = onChargeTap,
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        GlowRing(
-                            fraction = ((recovery ?: 0.0) / 100.0).toFloat(),
-                            value = recovery ?: 0.0,
-                            color = Palette.recoveryColor(recovery ?: 0.0),
-                            diameter = ring,
-                            lineWidth = ring * 0.10f,
-                            showsLabel = recovery != null,
-                        )
-                        if (recovery == null) RingEmptyOverlay(recoveryCalibration, lastScoredCharge, diameter = ring)
-                        // A1: the "tap me" chevron cue, pinned to the ring's bottom edge INSIDE the ring box
-                        // (BottomCenter + a downward offset) so it never adds to the column's stacked height.
-                        if (onChargeTap != null) RingTapCue(modifier = Modifier.align(Alignment.BottomCenter))
+                        // #802: when today has no Charge yet but a prior night's value is carried, draw a
+                        // DIMMED (0.8 opacity) REAL ring filled to the carried value, matching the Rest ring,
+                        // rather than a bare number on an empty track (which read as broken). Same diameter so
+                        // the self-sizing hero row is untouched; the dim + the carried "Last night · <date>"
+                        // caption mark it as carried, not today's fresh score. Mirrors iOS chargeRing (#802).
+                        val carried = if (recovery == null && recoveryCalibration == null) lastScoredCharge else null
+                        if (carried != null) {
+                            // #802: the carried branch draws ONLY the dimmed filled ring with the value
+                            // number inside, matching iOS chargeRing. The "Last night · <date>" note is NOT
+                            // drawn in-ring (an unbounded in-ring caption inflated the Charge column and broke
+                            // the three-equal-rings layout); it renders BELOW the hero via ScoreStateNote.
+                            GlowRing(
+                                modifier = Modifier.alpha(0.8f),
+                                fraction = (carried.value / 100.0).toFloat(),
+                                value = carried.value,
+                                color = Palette.recoveryColor(carried.value),
+                                diameter = ring,
+                                lineWidth = ring * 0.10f,
+                                showsLabel = true,
+                                format = { "${it.roundToInt()}" },
+                            )
+                        } else {
+                            GlowRing(
+                                fraction = ((recovery ?: 0.0) / 100.0).toFloat(),
+                                value = recovery ?: 0.0,
+                                color = Palette.recoveryColor(recovery ?: 0.0),
+                                diameter = ring,
+                                lineWidth = ring * 0.10f,
+                                showsLabel = recovery != null,
+                            )
+                            // Empty track + calibrating / no-data overlay (the carried case is handled above).
+                            if (recovery == null) RingEmptyOverlay(recoveryCalibration, diameter = ring)
+                        }
+                        // No in-ring tap cue: the single tap affordance is the CHARGE-label chevron below the
+                        // ring (HeroRingColumn), matching iOS where the in-ring cue was removed.
                     }
                 }
                 // EFFORT — strain on the gauge, on the user's selected scale.
@@ -1865,33 +1906,6 @@ private fun HeroRingColumn(
                 modifier = Modifier.semantics { contentDescription = "Source: $provenance" },
             )
         }
-    }
-}
-
-/**
- * A1: the small "tap me" chevron cue overlaid on the tappable Charge ring. A near-black circular chip with
- * a down-chevron tinted to the Charge world, sat at the ring's bottom edge INSIDE the ring box (so it adds
- * no stacked height, the #762 self-sizing parity). Decorative: the ring's own click label carries the
- * action, so this is hidden from accessibility. Mirrors the iOS ringTapCue.
- */
-@Composable
-private fun RingTapCue(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .offset(y = 9.dp)
-            .size(18.dp)
-            .clip(CircleShape)
-            .background(Palette.surfaceBase)
-            .border(1.dp, DomainTheme.Charge.color.copy(alpha = 0.35f), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Decorative: the ring's own click label carries the action, so the cue itself describes nothing.
-        Icon(
-            Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            tint = DomainTheme.Charge.color,
-            modifier = Modifier.size(12.dp),
-        )
     }
 }
 
@@ -2040,17 +2054,13 @@ private fun ReadinessHeroPill(word: String, level: ReadinessEngine.Level, onTap:
     }
 }
 
-/** Honest overlay shown over the Charge ring when today's recovery is null: calibrating count, the last
- *  scored Charge carried over, or No data. After the logical-day rollover the new day has no recovery
- *  until tonight is scored; rather than a bare "No Data" on the hero ring while live HR ticks (which
- *  reads as broken, #543), show the most recent scored Charge as a centred read-out clearly stamped
- *  "Last night · <date>". The ring TRACK stays empty (today genuinely isn't scored, so we never fill the
- *  GlowRing as if it were today's number) — the carried value sits inside it as a labelled prior reading.
- *  Mirrors iOS TodayView.ringEmptyOverlay. */
+/** Honest overlay shown over the Charge ring when today's recovery is null: either the calibrating count
+ *  or No data. The carried last-scored Charge case is NOT handled here anymore: it's intercepted earlier
+ *  and drawn as a dimmed FILLED ring in the carried branch (matching iOS chargeRing), so this overlay only
+ *  covers the calibrating and no-data cases. Mirrors iOS TodayView.ringEmptyOverlay. */
 @Composable
 private fun RingEmptyOverlay(
     calibratingNights: Int?,
-    lastScoredCharge: LastCharge? = null,
     diameter: Dp,
 ) {
     if (calibratingNights != null) {
@@ -2060,23 +2070,6 @@ private fun RingEmptyOverlay(
                 "$calibratingNights of ${Baselines.minNightsSeed}",
                 style = NoopType.footnote,
                 color = Palette.textSecondary,
-                maxLines = 1,
-            )
-        }
-    } else if (lastScoredCharge != null) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            // Ring text consistency (point 4 / iOS parity): the carried "49%" centre number renders in the
-            // SAME size + weight as a filled ring's number (glowRingCenterTextStyle), so a carried Charge, a
-            // clean value and "No Data" share one centre-number style. Its caption stays a footnote.
-            Text(
-                "${lastScoredCharge.value.roundToInt()}%",
-                style = glowRingCenterTextStyle(diameter, Palette.recoveryColor(lastScoredCharge.value)),
-                maxLines = 1,
-            )
-            Text(
-                lastScoredCharge.caption,
-                style = NoopType.footnote,
-                color = Palette.textTertiary,
                 maxLines = 1,
             )
         }
@@ -2641,6 +2634,7 @@ private fun ChargeBreakdownSheet(
     carriedDay: DailyMetric?,
     showReadiness: Boolean,
     onClose: () -> Unit,
+    onHowCalculated: () -> Unit,
 ) {
     Surface(modifier = Modifier.fillMaxSize(), color = Palette.surfaceBase) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -2675,6 +2669,54 @@ private fun ChargeBreakdownSheet(
                 // S4: the SEPARATE Readiness block now lives here behind the Charge-ring tap (today-only,
                 // matching the old inline gate). A one-word read (Push / Maintain / Rest) stays on the hero.
                 if (showReadiness) ReadinessSection(days, carriedDay = carriedDay)
+                // Everything above is what shaped YOUR Charge today; this opens the general METHOD behind the
+                // score, so the two are clearly separated, not conflated. Opens the scoring guide at the
+                // Charge section, the same target the per-ring ⓘ buttons use. Mirrors the iOS chargeBreakdown
+                // "How Charge is calculated" NavigationLink to ScoringGuideView(initialSection: .charge).
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable(
+                            onClickLabel = "How Charge is calculated",
+                            onClick = onHowCalculated,
+                        )
+                        .background(Palette.surfaceInset)
+                        .padding(14.dp)
+                        .semantics {
+                            contentDescription = "How Charge is calculated. The method behind the score."
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Functions,
+                        contentDescription = null,
+                        tint = DomainTheme.Charge.color,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                        Text(
+                            "How Charge is calculated",
+                            style = NoopType.subhead,
+                            color = Palette.textPrimary,
+                        )
+                        Text(
+                            "The method behind the score, not today's values.",
+                            style = NoopType.caption,
+                            color = Palette.textTertiary,
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = Palette.textTertiary,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
             }
         }
     }

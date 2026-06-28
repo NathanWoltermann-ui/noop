@@ -411,6 +411,10 @@ struct BodyClockCard: View {
 struct HeadsUpCard: View {
     /// The decision from `IllnessSignalEngine.evaluate(...)`, computed in the analytics pass.
     let result: IllnessSignalEngine.Result
+    /// Optional parallel Mahalanobis distance (IllnessDistance), computed on the SAME z-vector. It does
+    /// NOT gate this card (the engine's level already did); when the level is raised and a distance is
+    /// present we append a subtle "Confidence" line so the user can gauge how strong the signal is.
+    var distance: IllnessDistance.Result? = nil
 
     var body: some View {
         NoopCard(padding: 14, tint: hue) {
@@ -441,6 +445,13 @@ struct HeadsUpCard: View {
                 // ...and what was ruled out (the differentiating part vs a black-box warning).
                 if !result.suppressedBy.isEmpty {
                     whyRow(label: "Explained by", values: result.suppressedBy, tint: StrandPalette.textTertiary)
+                }
+                // Optional confidence read from the parallel Mahalanobis distance, only when the level is
+                // raised. Subtle by design: it augments, never gates (the engine already decided to raise).
+                if let confidence = confidenceLine {
+                    Text(confidence)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -489,6 +500,33 @@ struct HeadsUpCard: View {
         case .mild:          return "A few signals are up"
         case .quiet:         return "Nothing notable"
         }
+    }
+
+    /// A subtle confidence read from the parallel Mahalanobis distance, surfaced ONLY on the RAISED state
+    /// (and when a distance is present). nil otherwise. The already-unwell state is driven purely by the
+    /// user's own log and can have a near-zero distance (0-1 present features), giving a misleading
+    /// "Confidence: slight (distance 0.0)", so it's excluded. The raised path always has >= 2 present
+    /// features, so its distance is meaningful. The band mirrors Android exactly. (Augment-only, never gates.)
+    private var confidenceLine: String? {
+        guard result.level == .raised,
+              let d = distance else { return nil }
+        return "Confidence: \(IllnessConfidence.band(d.distance)) (distance \(IllnessConfidence.formatted(d.distance)))"
+    }
+}
+
+// MARK: - Illness confidence band (shared wording, mirrored byte-for-byte on Android)
+
+/// Maps the parallel Mahalanobis distance to a plain confidence word + a one-decimal display value.
+/// This is presentation-only: it NEVER decides whether the Heads-Up card shows (the engine's level
+/// already did). Bands: >= 3.5 strong, >= 2.5 moderate, else slight. Identical to the Kotlin twin.
+enum IllnessConfidence {
+    static func band(_ distance: Double) -> String {
+        if distance >= 3.5 { return "strong" }
+        if distance >= 2.5 { return "moderate" }
+        return "slight"
+    }
+    static func formatted(_ distance: Double) -> String {
+        String(format: "%.1f", distance)
     }
 }
 

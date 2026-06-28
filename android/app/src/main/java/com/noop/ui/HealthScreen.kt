@@ -404,7 +404,7 @@ private fun SkinTempSuiteSection(
         // Illness heads-up first when it has something to say (it's the most time-sensitive card).
         signals?.illness?.let { illness ->
             if (illness.level != IllnessSignalEngine.Level.QUIET) {
-                HeadsUpCard(result = illness)
+                HeadsUpCard(result = illness, distance = signals.illnessDistance)
             }
         }
 

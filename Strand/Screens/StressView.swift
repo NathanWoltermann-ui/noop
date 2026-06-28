@@ -43,6 +43,15 @@ struct StressView: View {
     /// Drives the Breathe sheet presented from the sustained-stress suggestion.
     @State private var showBreathe = false
 
+    /// ADDITIVE, on-demand advanced readouts, computed live from the SAME day's R-R the
+    /// daytime timeline already reads. These do NOT feed the 0..3 score or the timeline; they
+    /// are two extra, clearly-labelled HRV lenses surfaced in their own card. Nil until the
+    /// async read completes, and individually nil when their span/beat gates are not met.
+    /// Baevsky Stress Index components (si / Mo / AMo / MxDMn).
+    @State private var stressIndex: StressIndex.Components?
+    /// Frequency-domain HRV bands (LF / HF / LF-HF / total power).
+    @State private var freqHRV: HRVFreqDomain.Bands?
+
     /// Cached StressModel + the input signature it was built from. Rebuilding the
     /// model is expensive (z-score derivation + per-day date parsing over the full
     /// history), so we recompute it only when its inputs actually change — NOT on
@@ -87,11 +96,26 @@ struct StressView: View {
         let tz = TimeZone.current.secondsFromGMT(for: Date())
 
         let hr = await repo.hrSamples(from: from, to: to, limit: 200_000)
-        guard hr.count >= DaytimeStress.minHourHRSamples else { daytime = .empty; return }
+        // Too few HR samples: empty the timeline AND clear the advanced readouts in lockstep. Without this
+        // reset a later refresh that hits this path would leave the Advanced HRV card showing stale values
+        // next to an empty timeline (the readouts are only recomputed past this guard).
+        guard hr.count >= DaytimeStress.minHourHRSamples else {
+            daytime = .empty
+            stressIndex = nil
+            freqHRV = nil
+            return
+        }
         let rr = (try? await repo.storeHandle()?.rrIntervals(
             deviceId: repo.deviceId, from: from, to: to, limit: 200_000)) ?? []
 
         daytime = DaytimeStress.analyze(hr: hr, rr: rr, tzOffsetSeconds: tz)
+
+        // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
+        // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
+        // its own gate is not met (Baevsky needs >= 20 clean beats; freq-HRV needs >= 60 s span),
+        // in which case its row is simply hidden.
+        stressIndex = StressIndex.components(rr: rr)
+        freqHRV = HRVFreqDomain.freqDomain(rr: rr)
     }
 
     /// Recompute the cached `StressModel` only when (repo.days, storedSeries)
@@ -113,6 +137,14 @@ struct StressView: View {
             // 1. HERO — the count-up PipBar + band + one plain-English line, all in one card.
             heroCard(model)
                 .staggeredAppear(index: 0)
+
+            // 1b. ADVANCED HRV readouts (additive, on-demand). A separate, clearly-labelled card
+            //     that appears only when at least one engine returned a value. It sits BELOW the
+            //     hero and never alters the hero, the markers or the timeline.
+            if hasAdvancedReadouts {
+                advancedReadoutsCard()
+                    .staggeredAppear(index: 1)
+            }
 
             // 2. Today's numbers — uniform tiles in one grid.
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
@@ -303,6 +335,77 @@ struct StressView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, NoopMetrics.space1)
+            }
+        }
+    }
+
+    // MARK: 1b · Advanced HRV readouts (additive, on-demand)
+    //
+    // Two extra, clearly-labelled lenses on the SAME day's R-R the timeline already reads, surfaced
+    // in their own card so they are visibly separate from the 0..3 monitor. Each row is shown only
+    // when its engine produced a value (the engines self-gate on clean-beat count / record span),
+    // and the whole card is gated by `hasAdvancedReadouts`. Nothing here feeds the score.
+
+    /// True when at least one advanced readout is presentable (an SI value, or an LF/HF ratio, or
+    /// at least the HF power). Drives whether the advanced card is shown at all.
+    private var hasAdvancedReadouts: Bool {
+        if stressIndex != nil { return true }
+        if let f = freqHRV, f.lfhf != nil || f.hf > 0 { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private func advancedReadoutsCard() -> some View {
+        NoopCard(tint: StressRamp.calm) {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack {
+                    Text("Advanced HRV").strandOverline()
+                    Spacer()
+                    Text("on demand · today's R-R")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
+                    alignment: .leading,
+                    spacing: NoopMetrics.gap
+                ) {
+                    // Baevsky Stress Index, a whole number; higher means a more rigid, stressed rhythm.
+                    if let si = stressIndex {
+                        StatTile(
+                            label: "Baevsky Stress Index",
+                            value: "\(Int(si.si.rounded()))",
+                            caption: "Autonomic rigidity from your heart-rate rhythm. Higher means a more rigid, stressed rhythm.",
+                            accent: StressRamp.tense
+                        )
+                    }
+
+                    // Frequency-domain HRV: prefer the LF/HF ratio; if the span was too short for
+                    // LF (lfhf nil) fall back to the HF (rest) band power so the lens still reads.
+                    if let f = freqHRV {
+                        if let ratio = f.lfhf {
+                            StatTile(
+                                label: "Autonomic balance (LF/HF)",
+                                value: String(format: "%.1f", ratio),
+                                caption: "Sympathetic vs parasympathetic tone from frequency-domain HRV. Higher leans sympathetic (stress-ward).",
+                                accent: StressRamp.steady
+                            )
+                        } else if f.hf > 0 {
+                            StatTile(
+                                label: "HF power",
+                                value: "\(Int(f.hf.rounded()))",
+                                caption: "Parasympathetic (rest) band of your HRV.",
+                                accent: StressRamp.steady
+                            )
+                        }
+                    }
+                }
+
+                Text("These are extra, on-demand HRV lenses computed from today's R-R intervals. They are informational and do not change the stress score above.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

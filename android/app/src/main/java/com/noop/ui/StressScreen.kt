@@ -51,6 +51,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.DaytimeStress
+import com.noop.analytics.HrvFreqDomain
+import com.noop.analytics.StressIndex
 import com.noop.data.DailyMetric
 import java.util.Locale
 import kotlin.math.exp
@@ -100,8 +102,18 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
     // banked HR + R-R via the SAME 0–3 proxy the daily score uses. Null until the read
     // completes; DaytimeStress.Result.EMPTY when the day has no usable intraday HR.
     var daytime by remember { mutableStateOf<DaytimeStress.Result?>(null) }
+    // ADDITIVE, on-demand advanced readouts, computed live from the SAME day's R-R the daytime
+    // timeline already reads. These do NOT feed the 0..3 score or the timeline; they are two extra,
+    // clearly-labelled HRV lenses surfaced in their own card. Each stays null when its engine's
+    // span/beat gate is not met. Faithful twin of the iOS StressView readouts.
+    var stressIndex by remember { mutableStateOf<StressIndex.Components?>(null) }
+    var freqHrv by remember { mutableStateOf<HrvFreqDomain.Bands?>(null) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        daytime = runCatching { loadDaytimeStress(vm) }.getOrDefault(DaytimeStress.Result.EMPTY)
+        val read = runCatching { loadDaytimeStress(vm) }
+            .getOrDefault(DaytimeReadout(DaytimeStress.Result.EMPTY, null, null))
+        daytime = read.daytime
+        stressIndex = read.stressIndex
+        freqHrv = read.freqHrv
     }
 
     // Rebuild the model only when the inputs (days, stored) actually change — the
@@ -113,7 +125,7 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
         subtitle = "Autonomic load from HRV and resting heart rate",
     ) {
         when {
-            model != null -> StressContent(model, daytime, onBreathe)
+            model != null -> StressContent(model, daytime, stressIndex, freqHrv, onBreathe)
             !storedLoaded -> item { StressLoading() }
             else -> item { StressEmpty() }
         }
@@ -121,11 +133,24 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
 }
 
 /**
+ * The daytime timeline result plus the two additive, on-demand HRV readouts, all derived from the
+ * SAME day's R-R. The readouts are null when their engine's gate is not met (Baevsky needs >= 20
+ * clean beats; freq-HRV needs >= 60 s span) or when the day had no usable intraday HR. None of this
+ * touches the 0..3 score.
+ */
+private data class DaytimeReadout(
+    val daytime: DaytimeStress.Result,
+    val stressIndex: StressIndex.Components?,
+    val freqHrv: HrvFreqDomain.Bands?,
+)
+
+/**
  * Read TODAY's banked HR + R-R and build the intraday stress timeline. Local-day window
  * [midnight, now]; [DaytimeStress] buckets it into waking hours and reuses the daily
- * score's math, so this is the same proxy at a finer grain — never a new score.
+ * score's math, so this is the same proxy at a finer grain (never a new score). The SAME `rr` is
+ * then fed to the two additive HRV engines (no extra fetch, no DB / schema change).
  */
-private suspend fun loadDaytimeStress(vm: AppViewModel): DaytimeStress.Result {
+private suspend fun loadDaytimeStress(vm: AppViewModel): DaytimeReadout {
     val nowSeconds = System.currentTimeMillis() / 1000L
     val tzOffsetSeconds = java.util.TimeZone.getDefault().getOffset(nowSeconds * 1_000L) / 1_000L
     // Local midnight (wall-clock seconds): floor the LOCAL time to the day, then undo the
@@ -133,9 +158,16 @@ private suspend fun loadDaytimeStress(vm: AppViewModel): DaytimeStress.Result {
     val localNow = nowSeconds + tzOffsetSeconds
     val from = (localNow - Math.floorMod(localNow, 86_400L)) - tzOffsetSeconds
     val hr = vm.repo.hrSamples("my-whoop", from, nowSeconds, limit = 200_000)
-    if (hr.size < DaytimeStress.minHourHrSamples) return DaytimeStress.Result.EMPTY
+    if (hr.size < DaytimeStress.minHourHrSamples) {
+        return DaytimeReadout(DaytimeStress.Result.EMPTY, null, null)
+    }
     val rr = vm.repo.rrIntervals("my-whoop", from, nowSeconds, limit = 200_000)
-    return DaytimeStress.analyze(hr, rr, tzOffsetSeconds)
+    val daytime = DaytimeStress.analyze(hr, rr, tzOffsetSeconds)
+    // ADDITIVE advanced readouts from the SAME `rr`. Each engine self-gates and returns null when
+    // its requirement is not met, in which case its row is simply hidden in the UI.
+    val si = StressIndex.components(rr)
+    val freq = HrvFreqDomain.freqDomain(rr)
+    return DaytimeReadout(daytime, si, freq)
 }
 
 // MARK: - Loaded content
@@ -147,6 +179,8 @@ private suspend fun loadDaytimeStress(vm: AppViewModel): DaytimeStress.Result {
 private fun androidx.compose.foundation.lazy.LazyListScope.StressContent(
     model: StressModel,
     daytime: DaytimeStress.Result?,
+    stressIndex: StressIndex.Components?,
+    freqHrv: HrvFreqDomain.Bands?,
     onBreathe: () -> Unit,
 ) {
     // 1 · HERO — the count-up PipBar + band + one plain-English line, all in one card
@@ -154,6 +188,13 @@ private fun androidx.compose.foundation.lazy.LazyListScope.StressContent(
     //     CountUpText value with "of 3" + the band word beside it, over a band-tinted
     //     PipBar on the 0…3 scale. Flat, crisp, no needle, no gauge, no glow, no scenic).
     item { StressHeroCard(model, modifier = Modifier.staggeredAppear(0)) }
+
+    // 1b · ADVANCED HRV readouts (additive, on-demand). A separate, clearly-labelled card shown
+    //      only when at least one engine returned a value. It sits BELOW the hero and never alters
+    //      the hero, the markers or the timeline.
+    if (hasAdvancedReadouts(stressIndex, freqHrv)) {
+        item { StressAdvancedCard(stressIndex, freqHrv, modifier = Modifier.staggeredAppear(1)) }
+    }
 
     // 2 · Today's markers — uniform fixed-height tiles, two-up.
     item {
@@ -249,6 +290,106 @@ private fun StressHeroCard(model: StressModel, modifier: Modifier = Modifier) {
                 model.explanation,
                 style = NoopType.subhead,
                 color = Palette.textSecondary,
+            )
+        }
+    }
+}
+
+// MARK: - 1b · Advanced HRV readouts (additive, on-demand)
+//
+// Two extra, clearly-labelled lenses on the SAME day's R-R the timeline already reads, surfaced in
+// their own card so they are visibly separate from the 0..3 monitor. Each tile is shown only when
+// its engine produced a value (the engines self-gate on clean-beat count / record span), and the
+// whole card is gated by [hasAdvancedReadouts]. Nothing here feeds the score. Faithful twin of iOS.
+
+/**
+ * True when at least one advanced readout is presentable (an SI value, or an LF/HF ratio, or at
+ * least the HF power). Drives whether the advanced card is shown at all.
+ */
+private fun hasAdvancedReadouts(
+    stressIndex: StressIndex.Components?,
+    freqHrv: HrvFreqDomain.Bands?,
+): Boolean {
+    if (stressIndex != null) return true
+    if (freqHrv != null && (freqHrv.lfhf != null || freqHrv.hf > 0)) return true
+    return false
+}
+
+@Composable
+private fun StressAdvancedCard(
+    stressIndex: StressIndex.Components?,
+    freqHrv: HrvFreqDomain.Bands?,
+    modifier: Modifier = Modifier,
+) {
+    NoopCard(tint = Palette.stressColor, modifier = modifier) {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Overline("Advanced HRV", modifier = Modifier.weight(1f))
+                Text(
+                    "on demand · today's R-R",
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+            }
+
+            // The advanced tiles, two-up, mirroring the Today markers grid layout.
+            val tiles = ArrayList<@Composable (Modifier) -> Unit>()
+            // Baevsky Stress Index, a whole number; higher means a more rigid, stressed rhythm.
+            if (stressIndex != null) {
+                tiles.add { m ->
+                    StatTile(
+                        modifier = m,
+                        label = "Baevsky Stress Index",
+                        value = "${stressIndex.si.roundToInt()}",
+                        caption = "Autonomic rigidity from your heart-rate rhythm. Higher means a more rigid, stressed rhythm.",
+                        accent = StressRamp.TENSE,
+                    )
+                }
+            }
+            // Frequency-domain HRV: prefer the LF/HF ratio; if the span was too short for LF
+            // (lfhf null) fall back to the HF (rest) band power so the lens still reads.
+            if (freqHrv != null) {
+                val ratio = freqHrv.lfhf
+                if (ratio != null) {
+                    tiles.add { m ->
+                        StatTile(
+                            modifier = m,
+                            label = "Autonomic balance (LF/HF)",
+                            value = String.format(Locale.US, "%.1f", ratio),
+                            caption = "Sympathetic vs parasympathetic tone from frequency-domain HRV. Higher leans sympathetic (stress-ward).",
+                            accent = StressRamp.STEADY,
+                        )
+                    }
+                } else if (freqHrv.hf > 0) {
+                    tiles.add { m ->
+                        StatTile(
+                            modifier = m,
+                            label = "HF power",
+                            value = "${freqHrv.hf.roundToInt()}",
+                            caption = "Parasympathetic (rest) band of your HRV.",
+                            accent = StressRamp.STEADY,
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
+                tiles.chunked(2).forEach { rowTiles ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap)) {
+                        rowTiles.forEach { tile -> tile(Modifier.weight(1f)) }
+                        if (rowTiles.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+
+            Text(
+                "These are extra, on-demand HRV lenses computed from today's R-R intervals. They " +
+                    "are informational and do not change the stress score above.",
+                style = NoopType.footnote,
+                color = Palette.textTertiary,
             )
         }
     }

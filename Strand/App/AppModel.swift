@@ -124,6 +124,11 @@ final class AppModel: ObservableObject {
     // publishes them here; AppModel exposes them so HealthView / InsightsHubView read a snapshot rather
     // than re-deriving. All opt-in / honest-nil , a nil result means "not enough data / not enabled".
     @Published var illnessSignal: IllnessSignalEngine.Result?
+    /// Parallel Mahalanobis illness-distance read (IllnessDistance), computed on the SAME illness-ward
+    /// z-vector as illnessSignal but NEVER gating the alert. The shipped IllnessSignalEngine stays the
+    /// sole fire gate; this only surfaces a "how strong" confidence readout in the Heads-Up card when
+    /// the engine has already raised. nil = not computed this pass. (Augment-only, Option A.)
+    @Published var illnessDistance: IllnessDistance.Result?
     /// Cycle-phase awareness (only computed when the user has opted in; else nil). Awareness only.
     @Published var cyclePhase: CyclePhaseEngine.Result?
     /// The nightly fused-index curve (oldest→newest) feeding the cycle card's sparkline.
@@ -1108,7 +1113,7 @@ final class AppModel: ObservableObject {
     /// banner both come from the engine's single decision. On-device only, APPROXIMATE , not a diagnosis.
     private func evaluateIllness(_ days: [DailyMetric]) {
         guard behavior.illnessWatch, days.count >= 14 else {
-            healthAlert = nil; illnessSignal = nil; return
+            healthAlert = nil; illnessSignal = nil; illnessDistance = nil; return
         }
         Task { [weak self] in
             guard let self else { return }
@@ -1164,6 +1169,23 @@ final class AppModel: ObservableObject {
 
         let inputs = IllnessSignalEngine.Inputs(
             restingHR: rhr?.0, skinTemp: skin?.0, hrv: hrv?.0, respiration: resp?.0)
+
+        // PARALLEL Mahalanobis distance on the SAME illness-ward z-vector (RHR up, HRV negated, skin-temp
+        // up, respiration up). This NEVER gates the alert: the IllnessSignalEngine above remains the sole
+        // fire gate. We compute it here only so the Heads-Up card can show a "how strong" confidence band
+        // when the engine has already raised. nil where a reading is absent / not present (dropped from the
+        // distance). correlation: nil = identity, validated to agree ~100% with the z-sum detector.
+        func zIfPresent(_ r: (IllnessSignalEngine.SignalReading, Bool)?) -> Double? {
+            guard let reading = r?.0, reading.present else { return nil }
+            return reading.zIllnessward
+        }
+        let distanceFeatures = IllnessDistance.FeatureVector(
+            restingHR: zIfPresent(rhr),
+            rmssd: zIfPresent(hrv),       // hrv.zIllnessward is already the NEGATED HRV z
+            skinTemp: zIfPresent(skin),
+            respiration: zIfPresent(resp))
+        illnessDistance = IllnessDistance.evaluate(features: distanceFeatures, correlation: nil)
+
         // baselineTrusted: require the HRV/RHR baselines to be trusted before the engine may raise.
         let trusted = (rhr?.1 ?? false) || (hrv?.1 ?? false)
         let context = IllnessSignalEngine.Context(

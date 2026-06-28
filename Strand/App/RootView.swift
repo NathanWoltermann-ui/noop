@@ -30,6 +30,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case smartAlarm = "Smart Alarm"
     case settings = "Settings"
     case support = "Support"
+    case testCentre = "Test Centre"
 
     var id: String { rawValue }
 
@@ -68,6 +69,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .smartAlarm: return "Alarms"
         case .settings: return "Settings"
         case .support: return "Support"
+        case .testCentre: return "Test Centre"
         }
     }
 
@@ -101,6 +103,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .smartAlarm: return "alarm.fill"
         case .settings: return "gearshape.fill"
         case .support: return "heart.fill"
+        case .testCentre: return "stethoscope"
         }
     }
 }
@@ -134,7 +137,7 @@ struct NavGroup: Identifiable {
         ]),
         NavGroup(title: "Data & App", id: "data_app", items: [
             .devices, .dataSources, .appleHealth, .xiaomi, .backupSync, .fusedRecord,
-            .notifications, .automation, .smartAlarm, .settings, .support,
+            .notifications, .automation, .smartAlarm, .settings, .support, .testCentre,
         ]),
     ]
 
@@ -318,6 +321,7 @@ struct RootView: View {
         case .smartAlarm: SmartAlarmView()
         case .settings: settingsDetail
         case .support: SupportView()
+        case .testCentre: TestCentreView()
         }
     }
 
